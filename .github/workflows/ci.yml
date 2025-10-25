@@ -1,0 +1,257 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # ============================================================================
+  # Unit Tests with Sanitizers
+  # ============================================================================
+  test-sanitizers:
+    name: Tests + ASan/UBSan (${{ matrix.os }}, ${{ matrix.compiler }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GCC on Linux
+          - os: ubuntu-22.04
+            compiler: gcc
+            version: 12
+            cxx: g++-12
+            cc: gcc-12
+
+          # Clang on Linux
+          - os: ubuntu-22.04
+            compiler: clang
+            version: 15
+            cxx: clang++-15
+            cc: clang-15
+
+          # AppleClang on macOS
+          - os: macos-13
+            compiler: appleclang
+            cxx: clang++
+            cc: clang
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Compiler (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            sudo apt-get install -y g++-${{ matrix.version }}
+          else
+            sudo apt-get install -y clang-${{ matrix.version }}
+          fi
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+            -DINLINED_VECTOR_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+      - name: Run Tests
+        run: ./build/test_inlined_vector
+        env:
+          ASAN_OPTIONS: detect_leaks=1:check_initialization_order=1:strict_init_order=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+  # ============================================================================
+  # Fuzz Tests
+  # ============================================================================
+  fuzz-tests:
+    name: Fuzz Tests (Ubuntu, GCC 12)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-12 cmake ninja-build
+
+      - name: Configure CMake
+        run: |
+          cmake -B build_fuzz -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-12 \
+            -DCMAKE_C_COMPILER=gcc-12 \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_STANDARD=20 \
+            -DINLINED_VECTOR_BUILD_FUZZ_TESTS=ON
+
+      - name: Build
+        run: cmake --build build_fuzz --parallel $(nproc)
+
+      - name: Run Fuzz Tests
+        run: ./build_fuzz/fuzz_inlined_vector
+        timeout-minutes: 5
+
+  # ============================================================================
+  # Benchmarks (Performance Regression Check)
+  # ============================================================================
+  benchmarks:
+    name: Benchmarks (Ubuntu, GCC 12)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-12 cmake ninja-build libboost-dev
+
+      - name: Configure CMake
+        run: |
+          cmake -B build_bench -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-12 \
+            -DCMAKE_C_COMPILER=gcc-12 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-O3 -march=native" \
+            -DINLINED_VECTOR_BUILD_BENCHMARKS=ON
+
+      - name: Build
+        run: cmake --build build_bench --parallel $(nproc)
+
+      - name: Run Benchmarks (Quick)
+        run: |
+          ./build_bench/bench_inlined_vector \
+            --benchmark_filter="BM_Fill_Trivial.*/(1|8)" \
+            --benchmark_min_time=0.1s
+        timeout-minutes: 5
+
+      - name: Run Full Benchmarks
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          ./build_bench/bench_inlined_vector \
+            --benchmark_format=json \
+            --benchmark_out=benchmark_results.json
+        timeout-minutes: 15
+
+      - name: Upload Benchmark Results
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark_results.json
+
+  # ============================================================================
+  # C++17 Compatibility Check
+  # ============================================================================
+  cpp17-compat:
+    name: C++17 Compatibility Check
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-12
+
+      - name: Configure CMake (C++17)
+        run: |
+          cmake -B build \
+            -DCMAKE_CXX_COMPILER=g++-12 \
+            -DCMAKE_C_COMPILER=gcc-12 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DINLINED_VECTOR_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run Tests
+        run: ./build/test_inlined_vector
+
+  # ============================================================================
+  # Header-Only Check (Include Test)
+  # ============================================================================
+  header-only-check:
+    name: Header-Only Include Test
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-12
+
+      - name: Test Direct Include
+        run: |
+          cat > test_include.cpp << 'EOF'
+          #include "include/inlined_vector.hpp"
+          int main() {
+              lloyal::InlinedVector<int, 4> vec;
+              vec.push_back(1);
+              vec.push_back(2);
+              return vec.size() == 2 ? 0 : 1;
+          }
+          EOF
+          g++-12 -std=c++17 -I. test_include.cpp -o test_include
+          ./test_include
+
+  # ============================================================================
+  # Code Coverage (Optional - only on main branch)
+  # ============================================================================
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-12 lcov
+
+      - name: Configure CMake with Coverage
+        run: |
+          cmake -B build \
+            -DCMAKE_CXX_COMPILER=g++-12 \
+            -DCMAKE_C_COMPILER=gcc-12 \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="--coverage -fprofile-arcs -ftest-coverage" \
+            -DINLINED_VECTOR_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run Tests
+        run: ./build/test_inlined_vector
+
+      - name: Generate Coverage Report
+        run: |
+          lcov --capture --directory build --output-file coverage.info
+          lcov --remove coverage.info '/usr/*' --output-file coverage.info
+          lcov --list coverage.info
+
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.info
+          fail_ci_if_error: false

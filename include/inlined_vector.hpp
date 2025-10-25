@@ -196,19 +196,6 @@ private:
     /** @brief Checks if storage is currently inline (or valueless, treated as inline). Non-mutating. */
     bool is_inline() const noexcept { if (is_valueless_()) return true; return std::holds_alternative<InlineBuf>(storage_); }
 
-    /** @brief Gets a pointer to the beginning of the storage. Recovers if valueless. Returns sentinel if empty. */
-    pointer data() noexcept {
-        recover_if_valueless_(); // Ensure valid state before access
-        if (auto* buf = std::get_if<InlineBuf>(&storage_)) return buf->size == 0 ? empty_sentinel() : buf->ptr();
-        auto& vec = std::get<HeapVec>(storage_); return vec.empty() ? empty_sentinel() : vec.data();
-    }
-    /** @brief Gets a const pointer to the beginning of the storage. Returns sentinel if empty or valueless. Non-mutating. */
-    const_pointer data() const noexcept {
-        if (is_valueless_()) return empty_sentinel_c();
-        if (const auto* buf = std::get_if<InlineBuf>(&storage_)) return buf->size == 0 ? empty_sentinel_c() : buf->ptr();
-        const auto& vec = std::get<HeapVec>(storage_); return vec.empty() ? empty_sentinel_c() : vec.data();
-    }
-
 public:
     // ========================================================================
     // Constructors and Destructor
@@ -487,6 +474,18 @@ public:
     reference back() noexcept { recover_if_valueless_(); assert(!empty()); return data()[size() - 1]; }
     /** @brief Access the last element. @warning Undefined behavior if empty. */
     const_reference back() const noexcept { assert(!empty()); return data()[size() - 1]; }
+    /** @brief Returns a pointer to the underlying data. */
+    pointer data() noexcept {
+        recover_if_valueless_(); // Ensure valid state before access
+        if (auto* buf = std::get_if<InlineBuf>(&storage_)) return buf->size == 0 ? empty_sentinel() : buf->ptr();
+        auto& vec = std::get<HeapVec>(storage_); return vec.empty() ? empty_sentinel() : vec.data();
+    }
+    /** @brief Returns a const pointer to the underlying data. */
+    const_pointer data() const noexcept {
+        if (is_valueless_()) return empty_sentinel_c();
+        if (const auto* buf = std::get_if<InlineBuf>(&storage_)) return buf->size == 0 ? empty_sentinel_c() : buf->ptr();
+        const auto& vec = std::get<HeapVec>(storage_); return vec.empty() ? empty_sentinel_c() : vec.data();
+    }
 
 
     // ========================================================================
