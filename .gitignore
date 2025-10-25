@@ -1,0 +1,88 @@
+# Build directories
+build/
+build_*/
+cmake-build-*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Makefile
+
+# Compiled binaries
+test_inlined_vector
+fuzz_inlined_vector
+*.exe
+*.out
+*.app
+
+# Object files
+*.o
+*.obj
+*.lo
+*.slo
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Libraries
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Test artifacts
+Testing/
+*.gcov
+*.gcda
+*.gcno
+coverage.info
+coverage_report/
+
+# Sanitizer reports
+*.log
+*.asan
+*.ubsan
+*.tsan
+*.msan
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Generated documentation
+docs/html/
+docs/latex/
+doxygen_output/
+
+# Package manager files (if using conan/vcpkg)
+conaninfo.txt
+conanbuildinfo.*
+conan.lock
+vcpkg_installed/
+
+# Benchmark results
+*.json
+!CMakeLists.txt
+
+# Backup files
+*.bak
+*.orig
+*.rej
+
+# Python (if using scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
