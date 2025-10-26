@@ -34,6 +34,17 @@
 
 namespace lloyal {
 
+namespace detail {
+#if defined(__cpp_lib_construct_at) && __cpp_lib_construct_at >= 201911L
+using std::construct_at;
+#else
+template<class T, class... Args>
+constexpr T* construct_at(T* p, Args&&... args) {
+    return ::new (static_cast<void*>(p)) T(std::forward<Args>(args)...);
+}
+#endif
+} // namespace detail
+
 /**
  * @brief A std::vector-like container optimized for small sizes using
  * Small Buffer Optimization (SBO).
@@ -74,12 +85,6 @@ namespace lloyal {
 template<typename T, std::size_t N, typename Alloc = std::allocator<T>>
 class InlinedVector {
 public:
-    // --- Compile-Time Constraints ---
-    static_assert(N > 0, "InlinedVector requires an inline capacity N > 0");
-    static_assert(std::is_object_v<T> && !std::is_const_v<T> && !std::is_volatile_v<T>,
-                  "InlinedVector requires T to be a non-cv object type");
-    static_assert(std::is_move_constructible_v<T>, "InlinedVector requires T to be MoveConstructible");
-
     // --- Public Member Types ---
     using value_type = T;
     using allocator_type = Alloc;
@@ -94,9 +99,22 @@ public:
     using reverse_iterator = std::reverse_iterator<iterator>;
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
+private:
+    // Forward-declare for InlineBuf
+    template<class... Args> T* construct_at_(T* p, Args&&... args);
+    void destroy_at_(T* p) noexcept;
+    void destroy_n_(T* p, size_type n) noexcept;
+
+public:
+    // --- Compile-Time Constraints ---
+    static_assert(N > 0, "InlinedVector requires an inline capacity N > 0");
+    static_assert(std::is_object_v<T> && !std::is_const_v<T> && !std::is_volatile_v<T>,
+                  "InlinedVector requires T to be a non-cv object type");
+    static_assert(std::is_move_constructible_v<T>, "InlinedVector requires T to be MoveConstructible");
+
     // --- Static Constants ---
     /** @brief The number of elements that can be stored inline without heap allocation. */
-    static constexpr size_t inline_capacity = N;
+    static constexpr size_type inline_capacity = N;
 
     /**
      * @brief A compile-time constant indicating whether operations generally
@@ -120,23 +138,24 @@ private:
     struct InlineBuf {
         alignas(T) std::byte buf[sizeof(T) * N];
         size_type size = 0;
+        InlinedVector* parent_ = nullptr; // Pointer to parent for allocator-aware ops
 
-        InlineBuf() noexcept = default;
+        explicit InlineBuf(InlinedVector* parent) noexcept : parent_(parent) {}
         pointer ptr() noexcept { return std::launder(reinterpret_cast<pointer>(buf)); }
         const_pointer ptr() const noexcept { return std::launder(reinterpret_cast<const_pointer>(buf)); }
 
-        ~InlineBuf() { if constexpr (!std::is_trivially_destructible_v<T>) std::destroy_n(ptr(), size); }
+        ~InlineBuf() { if (parent_ && !std::is_trivially_destructible_v<T>) parent_->destroy_n_(ptr(), size); }
 
-        InlineBuf(const InlineBuf& other) : size(0) {
+        InlineBuf(const InlineBuf& other) : size(0), parent_(other.parent_) {
             pointer d = ptr(); const_pointer s = other.ptr(); size_type i = 0;
-            try { for (; i < other.size; ++i) std::construct_at(d + i, s[i]); size = other.size; }
-            catch (...) { std::destroy_n(d, i); throw; }
+            try { for (; i < other.size; ++i) parent_->construct_at_(d + i, s[i]); size = other.size; }
+            catch (...) { parent_->destroy_n_(d, i); throw; }
         }
 
-        InlineBuf(InlineBuf&& other) noexcept(std::is_nothrow_move_constructible_v<T>) : size(0) {
+        InlineBuf(InlineBuf&& other) noexcept(std::is_nothrow_move_constructible_v<T>) : size(0), parent_(other.parent_) {
             pointer d = ptr(); pointer s = other.ptr(); size_type i = 0;
-            try { for (; i < other.size; ++i) std::construct_at(d + i, std::move(s[i])); size = other.size; other.clear(); }
-            catch (...) { std::destroy_n(d, i); throw; } // Always re-throw
+            try { for (; i < other.size; ++i) parent_->construct_at_(d + i, std::move(s[i])); size = other.size; other.clear(); }
+            catch (...) { parent_->destroy_n_(d, i); throw; } // Always re-throw
         }
 
         InlineBuf& operator=(const InlineBuf& other) { if (this != &other) { InlineBuf temp(other); swap(temp); } return *this; }
@@ -144,17 +163,27 @@ private:
             if (this != &other) { InlineBuf temp_buf(std::move(other)); swap(temp_buf); } return *this;
         }
 
-        void clear() noexcept { if constexpr (!std::is_trivially_destructible_v<T>) std::destroy_n(ptr(), size); size = 0; }
+        void clear() noexcept { if (parent_ && !std::is_trivially_destructible_v<T>) parent_->destroy_n_(ptr(), size); size = 0; }
 
         void swap(InlineBuf& other) noexcept(std::is_nothrow_swappable_v<T> && std::is_nothrow_move_constructible_v<T>) {
             using std::swap; size_type min_sz = std::min(size, other.size);
             for (size_type i = 0; i < min_sz; ++i) swap(ptr()[i], other.ptr()[i]);
+            
             if (size > other.size) {
-                for (size_type i = min_sz; i < size; ++i) { std::construct_at(other.ptr() + i, std::move(ptr()[i])); std::destroy_at(ptr() + i); }
+                // move tail from *this into other (use other's allocator), then destroy in *this (use this->allocator)
+                for (size_type i = min_sz; i < size; ++i) {
+                    other.parent_->construct_at_(other.ptr() + i, std::move(ptr()[i]));
+                    parent_->destroy_at_(ptr() + i);
+                }
             } else if (other.size > size) {
-                for (size_type i = min_sz; i < other.size; ++i) { std::construct_at(ptr() + i, std::move(other.ptr()[i])); std::destroy_at(other.ptr() + i); }
+                // move tail from other into *this (use this allocator), then destroy in other
+                for (size_type i = min_sz; i < other.size; ++i) {
+                    parent_->construct_at_(ptr() + i, std::move(other.ptr()[i]));
+                    other.parent_->destroy_at_(other.ptr() + i);
+                }
             }
             swap(size, other.size);
+            // DO NOT swap parent_ — each buffer remains owned by its current parent
         }
     };
 
@@ -166,12 +195,7 @@ private:
     // ========================================================================
     // Allocator Traits Helpers (operate on raw T*)
     // ========================================================================
-    /** @brief Constructs an object at `p` using the container's allocator. */
-    template<class... Args> T* construct_at_(T* p, Args&&... args) { AllocTraits::construct(alloc_, p, std::forward<Args>(args)...); return p; }
-    /** @brief Destroys an object at `p` using the container's allocator. */
-    void destroy_at_(T* p) noexcept { AllocTraits::destroy(alloc_, p); }
-    /** @brief Destroys `n` objects starting at `p` using the container's allocator. */
-    void destroy_n_(T* p, size_type n) noexcept { for (size_type i = 0; i < n; ++i) AllocTraits::destroy(alloc_, p + i); }
+    // (Definitions moved out-of-class to fix redeclaration error)
 
     // ========================================================================
     // Helper methods for state management and optimization
@@ -191,7 +215,7 @@ private:
      * @brief Recovers from the valueless_by_exception state by emplacing an empty InlineBuf.
      * @warning Only call from non-const mutating methods. Ensures basic guarantee.
      */
-    void recover_if_valueless_() const noexcept { if (is_valueless_()) storage_.template emplace<InlineBuf>(); }
+    void recover_if_valueless_() const noexcept { if (is_valueless_()) storage_.template emplace<InlineBuf>(const_cast<InlinedVector*>(this)); }
 
     /** @brief Checks if storage is currently inline (or valueless, treated as inline). Non-mutating. */
     bool is_inline() const noexcept { if (is_valueless_()) return true; return std::holds_alternative<InlineBuf>(storage_); }
@@ -203,7 +227,7 @@ public:
 
     /** @brief Constructs an empty InlinedVector using the specified allocator. */
     explicit InlinedVector(const Alloc& alloc = Alloc{}) noexcept
-        : storage_(std::in_place_type<InlineBuf>), alloc_(alloc) {}
+        : storage_(std::in_place_type<InlineBuf>, this), alloc_(alloc) {}
 
     /** @brief Destroys the InlinedVector, clearing its contents. */
     ~InlinedVector() { clear(); } // Delegates destruction logic to clear()
@@ -211,7 +235,7 @@ public:
     /** @brief Copy constructor. Uses the source allocator according to allocator traits. */
     InlinedVector(const InlinedVector& other)
         : alloc_(AllocTraits::select_on_container_copy_construction(other.alloc_)),
-          storage_(std::in_place_type<InlineBuf>)
+          storage_(std::in_place_type<InlineBuf>, this)
     {
         const size_type n = other.size();
         if (n == 0) return;
@@ -236,7 +260,7 @@ public:
     }
     /** @brief Copy constructor using an explicitly provided allocator. */
     InlinedVector(const InlinedVector& other, const Alloc& alloc)
-        : alloc_(alloc), storage_(std::in_place_type<InlineBuf>)
+        : alloc_(alloc), storage_(std::in_place_type<InlineBuf>, this)
     {
         const size_type n = other.size();
         if (n == 0) return;
@@ -259,7 +283,7 @@ public:
     /** @brief Move constructor. Propagates allocator according to traits. */
     InlinedVector(InlinedVector&& other)
         noexcept(std::is_nothrow_move_constructible_v<T> && std::is_nothrow_move_constructible_v<Alloc>)
-        : alloc_(std::move(other.alloc_)), storage_(std::in_place_type<InlineBuf>)
+        : alloc_(std::move(other.alloc_)), storage_(std::in_place_type<InlineBuf>, this)
     {
         if (other.is_inline()) {
             auto& other_buf = std::get<InlineBuf>(other.storage_);
@@ -280,13 +304,14 @@ public:
             }
         } else {
             storage_ = std::move(other.storage_); // Steal vector
-            other.storage_.template emplace<InlineBuf>(); // Reset source
+            other.storage_.template emplace<InlineBuf>(&other); // Reset source
+            // No parent retarget needed: storage_ holds HeapVec, not InlineBuf
         }
     }
     /** @brief Move constructor using an explicitly provided allocator. Steals resources only if allocators compare equal. */
     InlinedVector(InlinedVector&& other, const Alloc& alloc)
         noexcept(std::is_nothrow_move_constructible_v<T>)
-        : alloc_(alloc), storage_(std::in_place_type<InlineBuf>)
+        : alloc_(alloc), storage_(std::in_place_type<InlineBuf>, this)
     {
          if (alloc_ == other.alloc_) {
              if (other.is_inline()) {
@@ -308,7 +333,8 @@ public:
                  }
              } else {
                  storage_ = std::move(other.storage_);
-                 other.storage_.template emplace<InlineBuf>();
+                 other.storage_.template emplace<InlineBuf>(&other);
+                 // No parent retarget needed: storage_ holds HeapVec, not InlineBuf
              }
          } else {
              // Allocators differ, must move elements individually
@@ -354,12 +380,12 @@ public:
         clear();
         const size_type n = other.size();
         if (n == 0) {
-            storage_.template emplace<InlineBuf>(); // Ensure inline
+            storage_.template emplace<InlineBuf>(this); // Ensure inline
             return *this;
         }
         if (n <= N) {
             // Construct into inline storage
-            storage_.template emplace<InlineBuf>();
+            storage_.template emplace<InlineBuf>(this);
             auto& buf = std::get<InlineBuf>(storage_);
             pointer d = buf.ptr();
             const_pointer s = other.data();
@@ -397,22 +423,25 @@ public:
                  clear();
                  alloc_ = std::move(other.alloc_);
                  storage_ = std::move(other.storage_);
-                 other.storage_.template emplace<InlineBuf>();
+                 other.storage_.template emplace<InlineBuf>(&other);
+                 if (is_inline()) std::get<InlineBuf>(storage_).parent_ = this; // Retarget parent
              } else if constexpr (IsAE::value) {
                  clear();
                  storage_ = std::move(other.storage_);
-                 other.storage_.template emplace<InlineBuf>();
+                 other.storage_.template emplace<InlineBuf>(&other);
+                 if (is_inline()) std::get<InlineBuf>(storage_).parent_ = this; // Retarget parent
              } else {
                   if (alloc_ == other.alloc_) {
                       clear();
                       storage_ = std::move(other.storage_);
-                      other.storage_.template emplace<InlineBuf>();
+                      other.storage_.template emplace<InlineBuf>(&other);
+                      if (is_inline()) std::get<InlineBuf>(storage_).parent_ = this; // Retarget parent
                   } else { // Element-wise move
                        clear();
                        const size_type n = other.size();
                        if (n == 0) { other.clear(); return *this; }
                        if (n <= N) {
-                           storage_.template emplace<InlineBuf>();
+                           storage_.template emplace<InlineBuf>(this);
                            auto& buf = std::get<InlineBuf>(storage_);
                            pointer d = buf.ptr();
                            size_type i = 0;
@@ -447,7 +476,14 @@ public:
     /** @brief Constructs from iterator range, using allocator alloc. */
     template<typename InputIt, std::enable_if_t<!std::is_integral_v<InputIt>, int> = 0>
     InlinedVector(InputIt first, InputIt last, const Alloc& alloc = Alloc{})
-        : InlinedVector(alloc) { reserve(std::distance(first, last)); for (; first != last; ++first) push_back(*first); }
+        : InlinedVector(alloc)
+    {
+        using cat = typename std::iterator_traits<InputIt>::iterator_category;
+        if constexpr (std::is_base_of_v<std::forward_iterator_tag, cat>) {
+            reserve(static_cast<size_type>(std::distance(first, last)));
+        }
+        for (; first != last; ++first) emplace_back(*first);
+    }
     /** @brief Constructs from initializer list, using allocator alloc. */
     InlinedVector(std::initializer_list<T> init, const Alloc& alloc = Alloc{})
         : InlinedVector(init.begin(), init.end(), alloc) {}
@@ -547,7 +583,7 @@ public:
         recover_if_valueless_(); if (is_inline()) return;
         auto& vec = std::get<HeapVec>(storage_); const size_type current_size = vec.size();
         if (current_size <= N) {
-            InlineBuf temp_buf; // Create on stack
+            InlineBuf temp_buf(this); // Create on stack
             pointer d = temp_buf.ptr(); pointer s = vec.data(); size_type i = 0;
             try {
                 for (; i < current_size; ++i) construct_at_(d + i, std::move(s[i]));
@@ -593,7 +629,7 @@ public:
                 const size_type old_size = buf->size;
                 const size_type new_cap = std::max<size_type>(N * 2, old_size + (old_size >> 1) + 1);
                 HeapVec vec(alloc_); vec.reserve(new_cap);
-                pointer src_ptr = buf->ptr();
+                pointer src_ptr = buf->ptr(); 
                 try {
                      for(size_type i=0; i < old_size; ++i) vec.emplace_back(std::move(src_ptr[i]));
                      vec.emplace_back(std::forward<Args>(args)...);
@@ -655,7 +691,7 @@ public:
                         return begin() + idx;
                     } else {
                         // Slow path: rebuild buffer using traits
-                        InlineBuf tmp; pointer d = tmp.ptr(); pointer s = buf->ptr(); size_type k = 0;
+                        InlineBuf tmp(this); pointer d = tmp.ptr(); pointer s = buf->ptr(); size_type k = 0;
                         try {
                             for (; k < idx; ++k) construct_at_(d + k, std::move_if_noexcept(s[k]));
                             construct_at_(d + k, src); ++k; // copy-construct src
@@ -747,7 +783,7 @@ public:
                         return begin() + idx;
                     } else {
                         // Slow path: rebuild buffer
-                        InlineBuf tmp; pointer d = tmp.ptr(); pointer s = buf->ptr(); size_type k = 0;
+                        InlineBuf tmp(this); pointer d = tmp.ptr(); pointer s = buf->ptr(); size_type k = 0;
                         try {
                             for (; k < idx; ++k) construct_at_(d + k, std::move(s[k]));
                             construct_at_(d + k, std::forward<decltype(src)>(src)); ++k; // move-construct
@@ -827,7 +863,7 @@ public:
                 buf->size = keep;
             } else {
                 // Slow path: rebuild buffer
-                InlineBuf tmp; pointer d = tmp.ptr(); const pointer s = buf->ptr(); size_type k = 0;
+                InlineBuf tmp(this); pointer d = tmp.ptr(); const pointer s = buf->ptr(); size_type k = 0;
                 try {
                     for (; k < start; ++k) construct_at_(d + k, std::move(s[k]));
                     for (size_type i = start + cnt; i < old_size; ++i, ++k) construct_at_(d + k, std::move(s[i]));
@@ -922,6 +958,12 @@ public:
         }
         // Mixed case: relies on std::variant::swap
         storage_.swap(other.storage_);
+
+        // Fix parent_ back-pointers post-swap
+        if (is_inline())
+            std::get<InlineBuf>(storage_).parent_ = this;
+        if (other.is_inline())
+            std::get<InlineBuf>(other.storage_).parent_ = &other;
     }
 
     // ========================================================================
@@ -959,6 +1001,29 @@ void swap(InlinedVector<T, N, Alloc>& lhs, InlinedVector<T, N, Alloc>& rhs)
     noexcept(noexcept(lhs.swap(rhs)))
 {
     lhs.swap(rhs);
+}
+
+// ============================================================================
+// Out-of-class definitions for allocator-aware helpers
+// ============================================================================
+
+template<typename T, std::size_t N, typename Alloc>
+template<class... Args>
+inline T* InlinedVector<T, N, Alloc>::construct_at_(T* p, Args&&... args) {
+    AllocTraits::construct(alloc_, p, std::forward<Args>(args)...);
+    return p;
+}
+
+template<typename T, std::size_t N, typename Alloc>
+inline void InlinedVector<T, N, Alloc>::destroy_at_(T* p) noexcept {
+    AllocTraits::destroy(alloc_, p);
+}
+
+template<typename T, std::size_t N, typename Alloc>
+inline void InlinedVector<T, N, Alloc>::destroy_n_(T* p, size_type n) noexcept {
+    for (size_type i = 0; i < n; ++i) {
+        AllocTraits::destroy(alloc_, p + i);
+    }
 }
 
 } // namespace lloyal

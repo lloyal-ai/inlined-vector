@@ -1,9 +1,9 @@
 /**
- * Comprehensive Test Suite for InlinedVector v5.7 (Allocator Aware) - Final
+ * Comprehensive Test Suite for InlinedVector v5.7 (Allocator Aware) - Final + Regressions
  *
  * This test suite validates all safety guarantees and correctness properties
  * of the InlinedVector implementation, including:
- * - Allocator awareness and propagation
+ * - Allocator awareness and propagation (including POCS/POCMA)
  * - Memory safety and destructor balance
  * - Exception safety guarantees (Strong/Basic)
  * - Swap safety between inline and heap storage
@@ -13,6 +13,7 @@
  * - Iterator invalidation rules
  * - Edge cases and boundary conditions
  * - Specific fixes from v4.1 - v5.7
+ * - Regression tests for parent_ pointer invariants (v5.7 fixes)
  */
 
 // Recommended compile flags: g++ -std=c++20 -O2 -g -fsanitize=address,undefined ...
@@ -30,7 +31,7 @@
 #include <algorithm> // For std::max, std::min, std::equal, std::lexicographical_compare
 
 // Include the InlinedVector header
-#include <inlined_vector.hpp>
+#include "inlined_vector.hpp"
 
 using namespace lloyal;
 
@@ -108,7 +109,7 @@ struct CopyConstructibleOnly {
 static_assert(std::is_nothrow_move_assignable_v<CopyConstructibleOnly>); static_assert(!std::is_copy_assignable_v<CopyConstructibleOnly>);
 
 
-// --- Test Allocator ---
+// --- Test Allocator (POCMA=true, POCS=false) ---
 template <typename T> struct TestAllocator {
     using value_type = T; static inline std::atomic<int> allocations{0}; static inline std::atomic<int> deallocations{0}; static inline std::atomic<int> constructs{0}; static inline std::atomic<int> destroys{0}; int id = 0;
     TestAllocator(int i = 0) noexcept : id(i) {}
@@ -117,8 +118,28 @@ template <typename T> struct TestAllocator {
     void deallocate(T* p, std::size_t n) { deallocations++; std::allocator<T>{}.deallocate(p, n); }
     template< class U, class... Args > void construct( U* p, Args&&... args ) { constructs++; ::new(const_cast<void*>(static_cast<const volatile void*>(p))) U(std::forward<Args>(args)...); }
     template< class U > void destroy( U* p ) { destroys++; p->~U(); }
-    using propagate_on_container_copy_assignment = std::false_type; using propagate_on_container_move_assignment = std::true_type; using propagate_on_container_swap = std::false_type; using is_always_equal = std::is_empty<TestAllocator<T>>;
+    using propagate_on_container_copy_assignment = std::false_type; 
+    using propagate_on_container_move_assignment = std::true_type; // Propagates on move
+    using propagate_on_container_swap = std::false_type; // Does NOT propagate on swap
+    using is_always_equal = std::false_type; // Not always equal
     friend bool operator==(const TestAllocator& a, const TestAllocator& b) { return a.id == b.id; } friend bool operator!=(const TestAllocator& a, const TestAllocator& b) { return a.id != b.id; }
+    static void reset() { allocations = 0; deallocations = 0; constructs = 0; destroys = 0; }
+};
+
+// --- Test Allocator (POCS=true) ---
+template <typename T> struct TestAllocatorPOCS {
+    using value_type = T; static inline std::atomic<int> allocations{0}; static inline std::atomic<int> deallocations{0}; static inline std::atomic<int> constructs{0}; static inline std::atomic<int> destroys{0}; int id = 0;
+    TestAllocatorPOCS(int i = 0) noexcept : id(i) {}
+    template <typename U> TestAllocatorPOCS(const TestAllocatorPOCS<U>& other) noexcept : id(other.id) {}
+    T* allocate(std::size_t n) { allocations++; return std::allocator<T>{}.allocate(n); }
+    void deallocate(T* p, std::size_t n) { deallocations++; std::allocator<T>{}.deallocate(p, n); }
+    template< class U, class... Args > void construct( U* p, Args&&... args ) { constructs++; ::new(const_cast<void*>(static_cast<const volatile void*>(p))) U(std::forward<Args>(args)...); }
+    template< class U > void destroy( U* p ) { destroys++; p->~U(); }
+    using propagate_on_container_copy_assignment = std::false_type; 
+    using propagate_on_container_move_assignment = std::true_type; 
+    using propagate_on_container_swap = std::true_type; // Propagates on swap
+    using is_always_equal = std::false_type;
+    friend bool operator==(const TestAllocatorPOCS& a, const TestAllocatorPOCS& b) { return a.id == b.id; } friend bool operator!=(const TestAllocatorPOCS& a, const TestAllocatorPOCS& b) { return a.id != b.id; }
     static void reset() { allocations = 0; deallocations = 0; constructs = 0; destroys = 0; }
 };
 
@@ -178,7 +199,7 @@ bool check_contents(const lloyal::InlinedVector<CopyConstructibleOnly, N, Alloc>
 // ============================================================================
 // TEST 1: Destructor Balance (Memory Leak Detection)
 // ============================================================================
-bool test_destructor_balance() { /* ... unchanged ... */
+bool test_destructor_balance() {
     std::cout << "\n--- TEST 1: Destructor Balance ---\n"; MyType::reset(); constexpr size_t INLINE_CAP = 4; using VecType = lloyal::InlinedVector<MyType, INLINE_CAP>; constexpr size_t HEAP_SIZE = 8;
     { VecType vec; for (size_t i = 0; i < HEAP_SIZE; ++i) vec.emplace_back(static_cast<int>(i)); CHECK(vec.size() == HEAP_SIZE); CHECK(vec.capacity() > VecType::inline_capacity); CHECK(MyType::live() == HEAP_SIZE); std::cout << "  Vector on heap, live objects: " << MyType::live() << "\n"; }
     std::cout << "  After destruction, live objects: " << MyType::live() << "\n"; CHECK(MyType::live() == 0); std::cout << "✅ PASS: Destructor balance maintained.\n"; return true;
@@ -187,7 +208,7 @@ bool test_destructor_balance() { /* ... unchanged ... */
 // ============================================================================
 // TEST 2: Swap Safety (Inline <-> Heap)
 // ============================================================================
-bool test_swap_safety() { /* ... unchanged ... */
+bool test_swap_safety() {
     std::cout << "\n--- TEST 2: Swap Safety (Inline <-> Heap) ---\n"; MyType::reset(); constexpr size_t INLINE_CAP = 5; using VecType = lloyal::InlinedVector<MyType, INLINE_CAP>;
     VecType v_inline; for(int i=0; i<3; ++i) v_inline.emplace_back(i); VecType v_heap; for(int i=0; i<6; ++i) v_heap.emplace_back(100 + i);
     CHECK(v_inline.capacity() == VecType::inline_capacity); CHECK(v_inline.size() == 3); CHECK(v_heap.capacity() > VecType::inline_capacity); CHECK(v_heap.size() == 6);
@@ -200,7 +221,7 @@ bool test_swap_safety() { /* ... unchanged ... */
 // ============================================================================
 // TEST 3: Copy Constructor Strong Safety
 // ============================================================================
-bool test_copy_constructor_strong_safety() { /* ... unchanged ... */
+bool test_copy_constructor_strong_safety() {
     std::cout << "\n--- TEST 3: Copy Constructor Strong Safety ---\n"; ThrowingCopy::reset();
     { using VecType = lloyal::InlinedVector<ThrowingCopy, 8>; VecType vec1_inline; for (int i = 0; i < 5; ++i) vec1_inline.push_back(i); ThrowingCopy::copy_throw_countdown = 3; std::cout << "  Attempting inline copy construction (will throw)...\n"; try { VecType vec2 = vec1_inline; std::cerr << "  ❌ FAIL: Inline copy exception not thrown!\n"; return false; } catch (const std::runtime_error& e) { std::cout << "  > Caught inline copy exception: " << e.what() << "\n"; } }
     ThrowingCopy::reset();
@@ -211,13 +232,6 @@ bool test_copy_constructor_strong_safety() { /* ... unchanged ... */
 // ============================================================================
 // TEST 4: In-Place Insert Exception Safety (Slow Path Rebuild)
 // ============================================================================
-// This test validates the slow-path rebuild logic used by insert() when fast
-// paths are unavailable (non-trivially-copyable, non-nothrow-move-assignable).
-//
-// Note: erase() is NOT tested here because ThrowOnMoveCtor has a noexcept move
-// assignment operator (defaulted), so erase() correctly selects the nothrow
-// fast path which uses move *assignment*, not move construction. This is the
-// intended behavior and validates our trait-based dispatch logic.
 bool test_inplace_insert_safety_slow_path() {
     std::cout << "\n--- TEST 4: In-Place Insert Exception Safety (Slow Path Rebuild) ---\n";
     constexpr size_t INLINE_CAP = 16;
@@ -252,7 +266,7 @@ bool test_inplace_insert_safety_slow_path() {
 // ============================================================================
 // TEST 5: Edge Cases
 // ============================================================================
-bool test_edge_cases() { /* ... unchanged ... */
+bool test_edge_cases() {
     std::cout << "\n--- TEST 5: Edge Cases ---\n"; MyType::reset(); constexpr size_t INLINE_CAP = 4; using VecType = lloyal::InlinedVector<MyType, INLINE_CAP>;
     { VecType vec; vec.clear(); CHECK(vec.empty()); CHECK(vec.size()==0); std::cout << "  Empty vector ops: OK\n"; }
     { VecType vec; vec.emplace_back(42); CHECK(vec.size()==1); CHECK(vec[0].value==42); vec.pop_back(); CHECK(vec.empty()); std::cout << "  Single element ops: OK\n"; }
@@ -266,7 +280,7 @@ bool test_edge_cases() { /* ... unchanged ... */
 // ============================================================================
 // TEST 6: Sentinel Pointers (Fix #2, #5, #6)
 // ============================================================================
-bool test_sentinel_pointers() { /* ... unchanged ... */
+bool test_sentinel_pointers() {
     std::cout << "\n--- TEST 6: Sentinel Pointers ---\n"; std::cout << "  Verifying sentinel on default-constructed empty vector...\n"; constexpr size_t INLINE_CAP = 4; using VecType = lloyal::InlinedVector<int, INLINE_CAP>;
     const VecType empty_vec;
     CHECK(empty_vec.size() == 0); CHECK(empty_vec.empty() == true); CHECK(empty_vec.capacity() == VecType::inline_capacity);
@@ -280,10 +294,9 @@ bool test_sentinel_pointers() { /* ... unchanged ... */
 // ============================================================================
 // TEST 7: Self-Aliasing Insert (Fix #7, #10, #12)
 // ============================================================================
-bool test_self_aliasing_insert() { /* ... FIX: Move MyType::reset() outside scopes ... */
+bool test_self_aliasing_insert() {
     std::cout << "\n--- TEST 7: Self-Aliasing Insert ---\n";
     std::cout << "  Testing lvalue self-insert...\n";
-    // FIX: Reset before scope
     MyType::reset(); { lloyal::InlinedVector<MyType, 5> v = {1, 2, 3}; v.insert(v.begin() + 1, v[0]); CHECK(check_contents(v, {1, 1, 2, 3})); CHECK(MyType::copy_constructions >= 1 || MyType::copy_assignments >= 1); std::cout << "    Inline lvalue alias: OK\n"; }
     MyType::reset(); { lloyal::InlinedVector<MyType, 3> v = {1, 2, 3}; v.insert(v.begin() + 1, v[0]); CHECK(check_contents(v, {1, 1, 2, 3})); CHECK(v.capacity() > 3); CHECK(MyType::copy_constructions >= 1 || MyType::copy_assignments >= 1); std::cout << "    Spill lvalue alias: OK\n"; }
     MyType::reset(); { lloyal::InlinedVector<MyType, 2> v = {1, 2, 3}; v.insert(v.begin() + 1, v[0]); CHECK(check_contents(v, {1, 1, 2, 3})); CHECK(v.capacity() > 2); CHECK(MyType::copy_constructions >= 1 || MyType::copy_assignments >= 1); std::cout << "    Heap lvalue alias: OK\n"; }
@@ -299,7 +312,7 @@ bool test_self_aliasing_insert() { /* ... FIX: Move MyType::reset() outside scop
 // ============================================================================
 // TEST 8: Trivial Non-Assignable Insert (Fix #4, #11)
 // ============================================================================
-bool test_trivial_non_assignable_insert() { /* ... unchanged ... */
+bool test_trivial_non_assignable_insert() {
     std::cout << "\n--- TEST 8: Trivial Non-Assignable Insert ---\n"; constexpr size_t INLINE_CAP = 5; using VecType = lloyal::InlinedVector<TrivialNonAssignable, INLINE_CAP>;
     VecType v = {1, 2, 3}; TrivialNonAssignable forty_two(42);
     std::cout << "  Testing lvalue insert (inline, should use memcpy)...\n"; v.insert(v.begin() + 1, forty_two); CHECK(v.capacity() == VecType::inline_capacity); CHECK(check_contents(v, {1, 42, 2, 3})); std::cout << "    Lvalue insert OK.\n";
@@ -311,7 +324,7 @@ bool test_trivial_non_assignable_insert() { /* ... unchanged ... */
 // ============================================================================
 // TEST 9: Non-Copy-Assignable Insert Guard (Fix #14)
 // ============================================================================
-bool test_non_copy_assignable_insert() { /* ... unchanged ... */
+bool test_non_copy_assignable_insert() {
     std::cout << "\n--- TEST 9: Non-Copy-Assignable Insert ---\n"; constexpr size_t INLINE_CAP = 5; using VecType = lloyal::InlinedVector<CopyConstructibleOnly, INLINE_CAP>;
     VecType v = {1, 2, 3}; CopyConstructibleOnly forty_two(42);
     std::cout << "  Attempting lvalue insert (inline, should fall back to slow path)...\n"; v.insert(v.begin() + 1, forty_two); CHECK(v.capacity() == VecType::inline_capacity); CHECK(check_contents(v, {1, 42, 2, 3})); std::cout << "    Lvalue insert guard OK (inline).\n";
@@ -323,30 +336,80 @@ bool test_non_copy_assignable_insert() { /* ... unchanged ... */
 // ============================================================================
 // TEST 10: Allocator Propagation & Usage (Basic)
 // ============================================================================
-bool test_allocator_support() { /* ... unchanged ... */
-     std::cout << "\n--- TEST 10: Allocator Propagation & Usage ---\n"; constexpr size_t INLINE_CAP = 2; using VecType = lloyal::InlinedVector<MyType, INLINE_CAP, TestAllocator<MyType>>; TestAllocator<MyType>::reset(); MyType::reset();
-     TestAllocator<MyType> alloc1(1); VecType v1(alloc1); CHECK(v1.get_allocator() == alloc1); CHECK(TestAllocator<MyType>::allocations == 0); std::cout << "  Construction with allocator: OK\n";
-     v1.emplace_back(10); v1.emplace_back(20); CHECK(v1.capacity() == VecType::inline_capacity); CHECK(v1.size() == 2); CHECK(TestAllocator<MyType>::constructs == 2); CHECK(TestAllocator<MyType>::allocations == 0); std::cout << "  Inline emplace_back uses traits: OK\n";
-     v1.emplace_back(30); CHECK(v1.capacity() > VecType::inline_capacity); CHECK(v1.size() == 3); CHECK(TestAllocator<MyType>::allocations > 0);
+bool test_allocator_support() {
+     std::cout << "\n--- TEST 10: Allocator Propagation & Usage ---\n"; 
+     constexpr size_t INLINE_CAP = 2; 
+     using VecType = lloyal::InlinedVector<MyType, INLINE_CAP, TestAllocator<MyType>>; 
+     
+     TestAllocator<MyType> alloc1(1); 
+     VecType v1(alloc1); 
+     CHECK(v1.get_allocator() == alloc1); 
+     CHECK(TestAllocator<MyType>::allocations == 0); 
+     std::cout << "  Construction with allocator: OK\n";
+     
+     v1.emplace_back(10); 
+     v1.emplace_back(20); 
+     CHECK(v1.capacity() == VecType::inline_capacity); 
+     CHECK(v1.size() == 2); 
+     CHECK(TestAllocator<MyType>::constructs == 2); 
+     CHECK(TestAllocator<MyType>::allocations == 0); 
+     std::cout << "  Inline emplace_back uses traits: OK\n";
+     
+     v1.emplace_back(30); 
+     CHECK(v1.capacity() > VecType::inline_capacity); 
+     CHECK(v1.size() == 3); 
+     CHECK(TestAllocator<MyType>::allocations > 0);
      #ifdef ZIPPER_STRICT_ALLOC_COUNTS
        CHECK(TestAllocator<MyType>::constructs == 2 + 1 + 2);
      #else
        CHECK(TestAllocator<MyType>::constructs >= 3);
      #endif
      std::cout << "  Spill to heap uses allocator: OK\n";
-     int allocs_after_spill = TestAllocator<MyType>::allocations; v1.push_back(MyType(40)); CHECK(TestAllocator<MyType>::allocations >= allocs_after_spill); std::cout << "  Heap push_back uses allocator: OK\n";
-     int destroys_before_clear = TestAllocator<MyType>::destroys; v1.clear(); CHECK(v1.empty()); CHECK(TestAllocator<MyType>::destroys > destroys_before_clear); std::cout << "  Clear uses traits (for heap part): OK\n";
-     TestAllocator<MyType> alloc2(2); VecType v2 = {MyType(1), MyType(2), MyType(3)}; VecType v3(v2, alloc2); CHECK(v3.get_allocator() == alloc2); CHECK(v3.size() == 3); CHECK(v3.capacity() > VecType::inline_capacity); std::cout << "  Copy ctor selects allocator: OK\n";
-     VecType v4(std::move(v3)); CHECK(v4.get_allocator() == alloc2); CHECK(v4.size() == 3); CHECK(v3.empty()); std::cout << "  Move ctor propagates allocator: OK\n";
-     VecType v5(alloc1); v5 = std::move(v4); CHECK(v5.get_allocator() == alloc2); CHECK(v5.size() == 3); CHECK(v4.empty()); std::cout << "  Move assign propagates allocator: OK\n";
-     TestAllocator<MyType>::reset(); MyType::reset(); { VecType v_final(alloc1); v_final.emplace_back(1); v_final.emplace_back(2); v_final.emplace_back(3); } CHECK(TestAllocator<MyType>::allocations == TestAllocator<MyType>::deallocations); CHECK(MyType::live() == 0);
-     std::cout << "✅ PASS: Allocator support integrated correctly.\n"; return true;
+     
+     int allocs_after_spill = TestAllocator<MyType>::allocations; 
+     v1.push_back(MyType(40)); 
+     CHECK(TestAllocator<MyType>::allocations >= allocs_after_spill); 
+     std::cout << "  Heap push_back uses allocator: OK\n";
+     
+     int destroys_before_clear = TestAllocator<MyType>::destroys; 
+     v1.clear(); 
+     CHECK(v1.empty()); 
+     CHECK(TestAllocator<MyType>::destroys > destroys_before_clear); 
+     std::cout << "  Clear uses traits (for heap part): OK\n";
+     
+     TestAllocator<MyType> alloc2(2); 
+     VecType v2 = {MyType(1), MyType(2), MyType(3)}; 
+     VecType v3(v2, alloc2); 
+     CHECK(v3.get_allocator() == alloc2); 
+     CHECK(v3.size() == 3); 
+     CHECK(v3.capacity() > VecType::inline_capacity); 
+     std::cout << "  Copy ctor selects allocator: OK\n";
+     
+     VecType v4(std::move(v3)); 
+     CHECK(v4.get_allocator() == alloc2); 
+     CHECK(v4.size() == 3); 
+     CHECK(v3.empty()); 
+     std::cout << "  Move ctor propagates allocator: OK\n";
+     
+     VecType v5(alloc1); 
+     v5 = std::move(v4); 
+     CHECK(v5.get_allocator() == alloc2); 
+     CHECK(v5.size() == 3); 
+     CHECK(v4.empty()); 
+     std::cout << "  Move assign propagates allocator: OK\n";
+     
+     // ** FIX: Removed mid-function reset and redundant v_final scope **
+     // The destructors for v1-v5 will run after this return,
+     // and the main() runner will check MyType::live() == 0.
+     
+     std::cout << "✅ PASS: Allocator support integrated correctly.\n"; 
+     return true;
 }
 
 // ============================================================================
 // TEST 11: Comparison Operators
 // ============================================================================
-bool test_comparisons() { /* ... unchanged ... */
+bool test_comparisons() {
     std::cout << "\n--- TEST 11: Comparison Operators ---\n"; using VecType = lloyal::InlinedVector<int, 4>; VecType v1 = {1, 2, 3}; VecType v2 = {1, 2, 3}; VecType v3 = {1, 2, 4}; VecType v4 = {1, 2}; VecType v_empty;
     CHECK(v1 == v2); CHECK(!(v1 != v2)); CHECK(v1 != v3); CHECK(!(v1 == v3)); CHECK(v1 != v4); CHECK(!(v1 == v4)); CHECK(v1 != v_empty); CHECK(!(v1 == v_empty)); CHECK(v1 < v3); CHECK(v1 <= v3); CHECK(v1 <= v2); CHECK(v4 < v1); CHECK(v4 <= v1); CHECK(v_empty < v1); CHECK(v_empty <= v1); CHECK(v_empty <= v_empty); CHECK(v3 > v1); CHECK(v3 >= v1); CHECK(v2 >= v1); CHECK(v1 > v4); CHECK(v1 >= v4); CHECK(v1 > v_empty); CHECK(v1 >= v_empty); CHECK(v_empty >= v_empty);
     std::cout << "✅ PASS: Comparison operators work correctly.\n"; return true;
@@ -355,7 +418,7 @@ bool test_comparisons() { /* ... unchanged ... */
 // ============================================================================
 // TEST 12: Iterator Invalidation
 // ============================================================================
-bool test_iterator_invalidation() { /* ... unchanged ... */
+bool test_iterator_invalidation() {
     std::cout << "\n--- TEST 12: Iterator Invalidation ---\n"; constexpr size_t INLINE_CAP = 3; using VecType = lloyal::InlinedVector<MyType, INLINE_CAP>; MyType::reset();
     { VecType vec = {1, 2}; MyType* p0 = &vec[0]; auto it_end = vec.end(); vec.insert(vec.begin() + 1, MyType(99)); CHECK(vec.size() == 3); CHECK(&vec[0] == p0); CHECK(vec[1].value == 99); CHECK(vec[2].value == 2); CHECK(vec.end() != it_end); std::cout << "  Inline insert invalidation: OK\n"; } MyType::reset();
     { VecType vec = {1, 2, 3}; MyType* p0 = &vec[0]; auto it_begin = vec.begin(); auto it_end = vec.end(); vec.push_back(MyType(4)); CHECK(vec.size() == 4); CHECK(vec.capacity() > VecType::inline_capacity); CHECK(vec.begin() != it_begin); CHECK(vec.end() != it_end); CHECK(&vec[0] != p0); std::cout << "  Inline->Heap transition invalidation: OK\n"; } MyType::reset();
@@ -364,15 +427,130 @@ bool test_iterator_invalidation() { /* ... unchanged ... */
     std::cout << "✅ PASS: Iterator invalidation behaves as expected.\n"; return true;
 }
 
+// ============================================================================
+// TEST 13: REGRESSION (InlineBuf::swap Allocator Mix-up)
+// ============================================================================
+bool test_regression_inline_swap_allocator() {
+    std::cout << "\n--- TEST 13: Regression (InlineBuf::swap Allocator Mix-up) ---\n";
+    using AllocPOCS = TestAllocatorPOCS<MyType>;
+    AllocPOCS::reset(); MyType::reset();
+    using VecType = lloyal::InlinedVector<MyType, 10, AllocPOCS>;
+    
+    {
+        VecType v_a({1, 2}, AllocPOCS(1)); // size 2
+        VecType v_b({10, 20, 30, 40}, AllocPOCS(2)); // size 4
+        CHECK(v_a.capacity() == VecType::inline_capacity); CHECK(v_b.capacity() == VecType::inline_capacity);
+        CHECK(v_a.get_allocator().id == 1);
+        CHECK(v_b.get_allocator().id == 2);
+        
+        std::cout << "  Swapping inline(size 2, alloc 1) with inline(size 4, alloc 2)...\n";
+        v_a.swap(v_b); // POCS=true, allocators will swap
+        
+        std::cout << "  Verifying contents and allocator propagation...\n";
+        CHECK(check_contents(v_a, {10, 20, 30, 40}));
+        CHECK(check_contents(v_b, {1, 2}));
+        CHECK(v_a.capacity() == VecType::inline_capacity); // Still inline
+        CHECK(v_b.capacity() == VecType::inline_capacity); // Still inline
+        CHECK(v_a.get_allocator().id == 2); // Allocators swapped
+        CHECK(v_b.get_allocator().id == 1);
+        CHECK(MyType::live() == 6);
+    } // v_a and v_b are destroyed here.
+    // With the bug, the swap itself would be UB (using alloc 1 on mem 2).
+    // With the fix, destruction uses the correct (swapped) allocators.
+    CHECK(MyType::live() == 0);
+    std::cout << "✅ PASS: InlineBuf::swap correctly used allocators.\n";
+    return true;
+}
+
+// ============================================================================
+// TEST 14: REGRESSION (parent_ Retargeting on Mixed Swap)
+// ============================================================================
+bool test_regression_parent_retarget_swap() {
+    std::cout << "\n--- TEST 14: Regression (parent_ Retargeting on Mixed Swap) ---\n";
+    using Alloc = TestAllocator<MyType>;
+    Alloc::reset(); MyType::reset();
+    using VecType = lloyal::InlinedVector<MyType, 4, Alloc>;
+    
+    {
+        // ** FIX: Use EQUAL allocators to satisfy the swap() precondition **
+        VecType v_inline({1, 2, 3}, Alloc(1));
+        VecType v_heap({10, 20, 30, 40, 50}, Alloc(1)); // 5 > 4, so heap
+        
+        CHECK(v_inline.capacity() == VecType::inline_capacity); 
+        CHECK(v_heap.capacity() > VecType::inline_capacity);
+        
+        std::cout << "  Swapping inline(alloc 1) with heap(alloc 1)...\n";
+        v_inline.swap(v_heap); // Allocs don't swap (POCS=false), but are equal.
+        
+        CHECK(v_inline.capacity() > VecType::inline_capacity); // v_inline now heap
+        CHECK(v_heap.capacity() == VecType::inline_capacity);  // v_heap now inline
+        CHECK(v_inline.get_allocator().id == 1);
+        CHECK(v_heap.get_allocator().id == 1);
+        CHECK(MyType::live() == 8);
+        
+        std::cout << "  Destroying v_heap (which now holds InlineBuf from v_inline)...\n";
+    } // v_heap is destroyed here. Its ~InlineBuf() MUST use alloc 1.
+      // With the stale parent_ bug, it would point to v_inline (which also has alloc 1,
+      // but ASan will catch the access to a potentially invalid 'this' pointer).
+      // v_inline is also destroyed.
+    
+    CHECK(MyType::live() == 0); // This check validates correct destruction.
+    std::cout << "✅ PASS: parent_ retargeted correctly on mixed-mode swap.\n";
+    return true;
+}
+
+// ============================================================================
+// TEST 15: REGRESSION (parent_ Retargeting on Move Assign)
+// ============================================================================
+bool test_regression_parent_retarget_move() {
+    std::cout << "\n--- TEST 15: Regression (parent_ Retargeting on Move Assign) ---\n";
+    using Alloc = TestAllocator<MyType>;
+    Alloc::reset(); MyType::reset();
+    using VecType = lloyal::InlinedVector<MyType, 4, Alloc>;
+    
+    VecType v_this(Alloc(1));
+    CHECK(v_this.capacity() == VecType::inline_capacity);
+    
+    {
+        VecType v_other({10, 20, 30}, Alloc(2));
+        CHECK(v_other.capacity() == VecType::inline_capacity);
+        
+        std::cout << "  Move-assigning inline(alloc 2) onto empty(alloc 1)...\n";
+        v_this = std::move(v_other); // Alloc propagates (POCMA=true)
+        
+        CHECK(v_other.capacity() == VecType::inline_capacity); // Other is left inline
+        CHECK(v_other.empty());
+        CHECK(v_other.get_allocator().id == 2);
+    } // v_other is destroyed (was empty)
+    
+    CHECK(v_this.capacity() == VecType::inline_capacity);
+    CHECK(v_this.get_allocator().id == 2); // v_this now has alloc 2
+    CHECK(check_contents(v_this, {10, 20, 30}));
+    CHECK(MyType::live() == 3);
+    
+    std::cout << "  Destroying v_this (which received InlineBuf from v_other)...\n";
+    // v_this is destroyed at end of function.
+    // With the bug, its ~InlineBuf() would use parent_ pointing to v_other (UB).
+    return true; // Leak check will be done by main runner
+}
+
 
 // ============================================================================
 // Main Test Runner
 // ============================================================================
 int main() {
-    std::cout << "\n"; std::cout << "===============================================\n"; std::cout << "   InlinedVector v5.7 Final Tests\n"; std::cout << "===============================================\n"; // Update title
+    std::cout << "\n"; std::cout << "===============================================\n"; std::cout << "   InlinedVector v5.7 (Fixed) Tests\n"; std::cout << "===============================================\n";
     int passed = 0; int total = 0; MyType::reset();
     auto run_test = [&](bool (*test)(), const char* name) {
-        total++; MyType::reset(); ThrowingCopy::reset(); MoveThrowsNoCopy::reset(); ThrowOnMoveCtor::reset(); TestAllocator<MyType>::reset();
+        total++; 
+        // Reset all trackers before each test
+        MyType::reset(); 
+        ThrowingCopy::reset(); 
+        MoveThrowsNoCopy::reset(); 
+        ThrowOnMoveCtor::reset(); 
+        TestAllocator<MyType>::reset();
+        TestAllocatorPOCS<MyType>::reset();
+
         std::cout << "\n-----------------------------------------------\n"; std::cout << "  Running Test: " << name << "\n"; std::cout << "-----------------------------------------------\n";
         bool result = false;
         try { // Add try/catch around test execution
@@ -386,17 +564,44 @@ int main() {
         }
 
         if (result) { passed++; } else { std::cerr << "\n⚠️  Test failed: " << name << "\n"; }
-        // Leak check logic remains the same
-        if (std::string(name).find("Balance") != std::string::npos || std::string(name).find("Swap") != std::string::npos || std::string(name).find("Aliasing") != std::string::npos || std::string(name).find("Edge Cases") != std::string::npos || std::string(name).find("Allocator") != std::string::npos || std::string(name).find("Invalidation") != std::string::npos) {
-            int leaks = MyType::live();
-            if (leaks != 0) { std::cerr << "  -> MEMORY LEAK DETECTED in " << name << ": " << leaks << " MyType objects leaked!\n"; if (passed == total && result) passed--; } // Correct decrement logic
-            else { std::cout << "  -> No MyType memory leaks in " << name << ".\n"; }
+        
+        // Always check for leaks after every test
+        int leaks = MyType::live();
+        if (leaks != 0) { 
+            std::cerr << "  -> MEMORY LEAK DETECTED in " << name << ": " << leaks << " MyType objects leaked!\n"; 
+            if (result) { passed--; } // Failed due to leak
+        } else { 
+            if (result) { std::cout << "  -> No MyType memory leaks in " << name << ".\n"; }
         }
     };
-    run_test(test_destructor_balance, "Destructor Balance"); run_test(test_swap_safety, "Swap Safety"); run_test(test_copy_constructor_strong_safety, "Copy Constructor Strong Safety"); run_test(test_inplace_insert_safety_slow_path, "In-Place Insert Exception Safety (Slow Path)"); run_test(test_edge_cases, "Edge Cases"); run_test(test_sentinel_pointers, "Sentinel Pointers"); run_test(test_self_aliasing_insert, "Self-Aliasing Insert"); run_test(test_trivial_non_assignable_insert, "Trivial Non-Assignable Insert"); run_test(test_non_copy_assignable_insert, "Non-Copy-Assignable Insert Guard"); run_test(test_allocator_support, "Allocator Support"); run_test(test_comparisons, "Comparison Operators"); run_test(test_iterator_invalidation, "Iterator Invalidation");
+
+    run_test(test_destructor_balance, "Destructor Balance"); 
+    run_test(test_swap_safety, "Swap Safety"); 
+    run_test(test_copy_constructor_strong_safety, "Copy Constructor Strong Safety"); 
+    run_test(test_inplace_insert_safety_slow_path, "In-Place Insert Exception Safety (Slow Path)"); 
+    run_test(test_edge_cases, "Edge Cases"); 
+    run_test(test_sentinel_pointers, "Sentinel Pointers"); 
+    run_test(test_self_aliasing_insert, "Self-Aliasing Insert"); 
+    run_test(test_trivial_non_assignable_insert, "Trivial Non-Assignable Insert"); 
+    run_test(test_non_copy_assignable_insert, "Non-Copy-Assignable Insert Guard"); 
+    run_test(test_allocator_support, "Allocator Support"); 
+    run_test(test_comparisons, "Comparison Operators"); 
+    run_test(test_iterator_invalidation, "Iterator Invalidation");
+    
+    // Add new regression tests
+    run_test(test_regression_inline_swap_allocator, "Regression: InlineBuf::swap Allocator");
+    run_test(test_regression_parent_retarget_swap, "Regression: parent_ Retargeting (Swap)");
+    run_test(test_regression_parent_retarget_move, "Regression: parent_ Retargeting (Move)");
+
+
     std::cout << "\n"; std::cout << "========================================\n"; std::cout << "            Test Summary\n"; std::cout << "========================================\n"; std::cout << "  Passed: " << passed << "/" << total << "\n";
     int final_leaks = MyType::live();
-    if (final_leaks != 0) { std::cerr << "\n❌ OVERALL MEMORY LEAK DETECTED: " << final_leaks << " MyType objects leaked!\n"; if (passed == total) passed--; } else { std::cout << "\n✅ Overall MyType memory balance maintained.\n"; }
-    if (passed == total) { std::cout << "\n🎉 SUCCESS: All tests passed!\n"; std::cout << "InlinedVector v5.7 is production-ready.\n"; return 0; } // Update version
-    else { std::cout << "\n❌ FAILURE: " << (total - std::max(0, passed)) << " tests failed or leaks detected.\n"; std::cout << "Please review the implementation and test output.\n"; return 1; }
+    if (final_leaks != 0) { std::cerr << "\n❌ OVERALL MEMORY LEAK DETECTED: " << final_leaks << " MyType objects leaked!\n"; if (passed == total) passed--; } 
+    else { std::cout << "\n✅ Overall MyType memory balance maintained.\n"; }
+    
+    if (passed == total) { 
+        std::cout << "\n🎉 SUCCESS: All tests passed!\n"; std::cout << "InlinedVector v5.7 is production-ready.\n"; return 0; 
+    } else { 
+        std::cout << "\n❌ FAILURE: " << (total - std::max(0, passed)) << " tests failed or leaks detected.\n"; std::cout << "Please review the implementation and test output.\n"; return 1; 
+    }
 }

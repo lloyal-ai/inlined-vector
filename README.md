@@ -20,9 +20,12 @@ This container is a production-ready, drop-in replacement for `std::vector` in s
   * **Small Buffer Optimization**: Guarantees zero heap allocations as long as `size() <= N`.
   * **Bidirectional Heap↔Inline Transitions**: `shrink_to_fit()` can return from heap to inline storage, eliminating permanent allocations from temporary size spikes.
   * **Allocator-Aware**: Full support for `std::allocator_traits` and `std::pmr`.
-      * Correctly propagates allocators for `std::uses_allocator` types (like `std::pmr::string`) during construction, **even for inline elements**.
+      * Guarantees **correct allocator propagation** (POCMA, POCS, `select_on_container_copy_construction`) consistent with standard containers.
+      * Ensures `std::uses_allocator` construction uses the **correct owning allocator instance**, even for elements stored inline.
+      * All element lifetimes (construction/destruction) are managed via `allocator_traits` through the **owning container's allocator**, ensuring compatibility with stateful or custom allocators.
+      * **ABI Note (v5.7+):** The addition of the `parent_` pointer to `InlineBuf` changes the memory layout. Code compiled against v5.6 or earlier is **not binary-compatible** with v5.7+.
   * **Supports Non-Assignable Types**: `insert()` and `erase()` work for non-assignable types (e.g., `const` members) even when heap-allocated, a feature `std::vector` and other SBO implementations lack.
-  * **Robust Exception Safety**: Provides the **strong exception guarantee** for most operations and safely handles the `valueless_by_exception` state through automatic recovery.
+  * **Robust Exception Safety**: Provides the **strong exception guarantee** for most operations by default, using internal rebuild-and-swap where necessary. Clearly defines the **single specific scenario** (inline insert fast-path with throwing copy assignment) where the basic guarantee applies, and safely handles the `valueless_by_exception` state through automatic recovery on mutation.
   * **Sanitizer-Clean**: Verified clean with AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan).
   * **Fuzz-Tested**: Validated against Google FuzzTest for property-based correctness.
   * **Compact Implementation**: \~965 lines in a single header with comprehensive comments explaining design decisions.
@@ -163,18 +166,56 @@ This approach ensures **optimal performance for modern types** (Tiers 1-2) while
       * **Mutating methods** (e.g., `push_back()`) will *safely recover* by re-emplacing an empty inline buffer before proceeding.
   * **`noexcept` Contract:** `noexcept` functions that encounter an internal exception (e.g., from a `T` that violated its `noexcept` contract) will **unconditionally `throw;`**, correctly invoking `std::terminate()` as per the C++ standard.
 
+-----
+
+## Detailed Guarantees
+
+Beyond the `std::vector`-like API, `lloyal::InlinedVector` provides specific behavioral guarantees, especially regarding allocators and exceptions.
+
+### Allocator Propagation and Usage
+
+`InlinedVector` adheres strictly to standard C++ allocator rules:
+
+* **Construction:** Allocators are passed via constructors and stored. `select_on_container_copy_construction` is used for copy construction allocator selection.
+* **Element Lifetime:** **All** construction and destruction of elements `T`, whether stored inline or on the heap, is performed using `std::allocator_traits<Alloc>::construct` and `std::allocator_traits<Alloc>::destroy` invoked on the **container's current allocator instance**. This ensures correct behavior even with stateful allocators or allocators with custom `construct`/`destroy` logic. The internal `InlineBuf` uses a `parent_` pointer back to the owning `InlinedVector` to access the correct allocator instance for these operations.
+* **Copy Assignment (`operator=`):** Honors `propagate_on_container_copy_assignment` (POCMA). If `POCMA::value` is true and allocators differ, the destination's allocator is replaced *after* clearing elements with the old allocator. If false, allocators must be equal (or behavior is undefined per standard library rules, though `InlinedVector` handles this via element-wise copy).
+* **Move Assignment (`operator=`):** Honors `propagate_on_container_move_assignment` (POCMA).
+    * If `POCMA::value` is true, the source allocator is **always moved** to the destination (after clearing destination contents). The source container is left with a default-constructed allocator.
+    * If `POCMA::value` is false (and `is_always_equal::value` is false), allocators **must compare equal** for resource stealing (O(1) move). If they differ, an **element-wise move** is performed using the destination's allocator (O(n)).
+    * **Invariant:** If the move results in the destination holding an `InlineBuf`, its internal `parent_` pointer is correctly **retargeted** to the destination container.
+* **Swap (`swap()` member and non-member):** Honors `propagate_on_container_swap` (POCS).
+    * If `POCS::value` is true, the allocator instances themselves are **swapped** between the containers using `std::swap`.
+    * If `POCS::value` is false (and `is_always_equal::value` is false), the allocators **must compare equal**. Swapping containers with unequal, non-propagating allocators is **undefined behavior** per the standard; `InlinedVector` includes an `assert` to detect this in debug builds.
+    * **Invariant:** During a swap involving one inline and one heap container (`mixed swap`), the internal `InlineBuf` object may move between containers via `std::variant::swap`. After the swap, the `parent_` pointer within any moved `InlineBuf` is correctly **retargeted** to its new owning container. The `parent_` pointers are *never* swapped directly by `InlineBuf::swap`.
+
+### Enhanced Exception Safety
+
+`InlinedVector` prioritizes correctness and aims for the strong guarantee where feasible.
+
+* **Strong Guarantee (Default):** Operations like `push_back`, `emplace_back`, `reserve`, `shrink_to_fit`, and `insert`/`erase` (when not using the specific inline fast path below) provide the strong guarantee. If an exception occurs (e.g., from an element's constructor or move), the container is **rolled back to its original state**. This is achieved primarily through:
+    * Copy-and-swap or rebuild-and-swap semantics for heap operations.
+    * Careful ordering and RAII (`InlineBuf` temporary) for inline rebuilds.
+* **Basic Guarantee (Specific Case):** The **only** deviation from the strong guarantee occurs during the **fast path** of `insert()` when operating **inline** *and* when `T` satisfies `std::is_nothrow_move_assignable_v<T>` and `std::is_copy_assignable_v<T>`. This path shifts elements using move assignment for performance. If the final **copy assignment** (`p[idx] = src`) throws an exception, the container remains in a **valid state** (destructible, invariants hold), but the element at `p[idx]` might be left in a moved-from state, and the newly constructed temporary element at the end will be destroyed. This matches the basic guarantee provided by `std::vector::insert` under similar conditions.
+* **`valueless_by_exception` Handling:** If an operation leaves the internal `std::variant` storage in the valueless state (e.g., due to an exception during a move in `shrink_to_fit` or `swap`), the container guarantees:
+    * **`const` methods** (`size`, `empty`, `capacity`, `data`, iterators, `operator[]`, `at`) will **safely operate** as if the container is empty (returning 0 size, valid empty ranges, etc.) **without modifying** the state.
+    * Any subsequent **mutating operation** (`push_back`, `insert`, `clear`, etc.) will first **atomically recover** by emplacing a default-constructed `InlineBuf` before proceeding with the operation. This ensures the container always transitions back to a valid state upon mutation.
+
+### Trivial Type Optimizations (Implicit Lifetime)
+
+For trivially copyable types `T`, `InlinedVector` uses `memcpy` and `memmove` for certain inline operations (like append or shift during insert/erase) to improve performance. This is **correct and standard-conformant** under C++17's P0593 rules ("Implicit object creation for trivial types"), which allow objects of such types to implicitly begin their lifetime when their storage is written via byte-copy operations.
+
 ### Iterator Invalidation
 
 Invalidation rules are critical and follow `std::vector` logic *within a storage mode*.
 
-| Operation | Invalidation |
-| :--- | :--- |
-| `push_back`, `insert`, `emplace_back` | **All iterators, pointers, and references are invalidated** if `size() > capacity()` (causing reallocation) or if `size()` crosses `N` (spilling to heap). |
-| `reserve`, `shrink_to_fit` | **All iterators, pointers, and references are invalidated** if the storage mode changes (inline↔heap) or if heap capacity changes. |
-| `insert`, `erase` (no realloc) | All iterators, pointers, and references at or after the point of modification are invalidated. |
-| `clear()`, `operator=` | All iterators, pointers, and references are invalidated. |
-| `pop_back` | The `end()` iterator and references/pointers to the last element are invalidated. |
-| `swap` | All iterators, pointers, and references are invalidated (unless both are heap-allocated and allocators propagate). |
+| Operation | Invalidation | Reason |
+| :--- | :--- | :--- |
+| `push_back`, `insert`, `emplace_back` | **All** iterators, pointers, references | If `size()` > `capacity()` (reallocation) **OR** if `size()` crosses `N` (transition inline→heap). |
+| `reserve`, `shrink_to_fit` | **All** iterators, pointers, references | If storage mode changes (inline↔heap) **OR** if heap capacity changes. |
+| `insert`, `erase` (no realloc/transition) | At or after modification point | Standard sequential container behavior. |
+| `clear()`, `operator=` | **All** iterators, pointers, references | Container contents replaced. |
+| `pop_back` | `end()` iterator, last element ref/ptr | Last element removed. |
+| `swap` | **All** iterators, pointers, references | Unless both heap & POCS=true/`is_always_equal`. Container contents change owners. |
 
 -----
 
@@ -192,11 +233,18 @@ Invalidation rules are critical and follow `std::vector` logic *within a storage
       * **Full support for non-assignable types** (types with `const` members work everywhere)
       * **Valueless exception recovery** for guaranteed basic safety
 
-  * **`absl::InlinedVector` & `boost::container::small_vector`: C++11 Compatibility**
-    Both use highly optimized C++11-compatible designs (custom storage or inheritance) that are coupled to their respective parent libraries. Trade-offs:
+  * **`absl::InlinedVector`: Modern C++ Design (Current Master)**
+    Uses sophisticated storage management with `shrink_to_fit()` support. Part of Abseil library:
 
-      * ❌ Requires entire Abseil or Boost library infrastructure
-      * ❌ Cannot transition from heap back to inline (permanent allocations)
+      * ✅ Supports heap↔inline transitions via `shrink_to_fit()` (added post-LTS 2021)
+      * ❌ Requires entire Abseil library infrastructure
+      * ❌ Fails to compile `insert`/`erase` on non-assignable types when on the heap
+
+  * **`boost::container::small_vector`: C++03/11 Compatibility**
+    C++11-compatible design with permanent heap allocation after first spill:
+
+      * ❌ Requires Boost library infrastructure
+      * ❌ **Permanent heap allocation** after first spill (per Boost docs: "any change to capacity...will cause the vector to permanently switch to dynamically allocated storage")
       * ❌ Fails to compile `insert`/`erase` on non-assignable types when on the heap
 
 ### Head-to-Head (N=16)
@@ -205,12 +253,14 @@ Invalidation rules are critical and follow `std::vector` logic *within a storage
 | :--- | :--- | :--- | :--- |
 | **C++ Standard** | **C++17 / C++20** | C++11 | C++03 / C++11 |
 | **Dependencies** | **None (Single Header)** | Abseil Library Base | Boost Libraries |
-| **Bidirectional Heap↔Inline** | ✅ **Yes (via `shrink_to_fit`)** | ❌ **No (Permanent Heap)** | ❌ **No (Permanent Heap)** |
+| **Bidirectional Heap↔Inline** | ✅ **Yes (via `shrink_to_fit`)** | ✅ **Yes (via `shrink_to_fit`)*** | ❌ **No (Permanent Heap)** |
 | **Support for Non-Assignable Types** | ✅ **Fully Supported** | ❌ **Not Supported on Heap** | ❌ **Not Supported on Heap** |
 | **Heap `insert` Algorithm** | **Rebuild-and-Swap** | In-Place Shift | In-Place Shift |
 | **Heap `insert` Perf. (Complex)** | **\~2.3% slower** vs `std::vector` | \~0.3% slower vs `std::vector` | \~2.5% faster vs `std::vector` |
 | **Inline `push_back` Perf. (Trivial)** | **12.7x faster** vs `std::vector` | 8.0x faster vs `std::vector` | 10.8x faster vs `std::vector` |
 | **Non-Assignable `insert` (Heap)** | ✅ **Compiles & Runs (\~623 ns)** | ❌ **Compile Fail** | ❌ **Compile Fail** |
+
+***Note:** Abseil's `shrink_to_fit()` was added post-LTS 2021. Older LTS versions (e.g., 2021_03_24) lack this feature. This comparison uses current master branches (as of 2025-01).
 
 ### Key Insights:
 
@@ -246,7 +296,7 @@ Invalidation rules are critical and follow `std::vector` logic *within a storage
   * Need absolute fastest heap insert for complex types (~10% advantage)
   * Require C++03/C++11 compatibility (Boost supports C++03)
   * Prioritize decades of production battle-testing over modern C++17/20 features
-  * Don't need non-assignable type support or heap→inline transitions
+  * Don't need non-assignable type support (all implementations support heap→inline transitions except Boost)
 
 -----
 
@@ -288,6 +338,8 @@ vec.emplace_back("world");
 ### Non-Assignable Types
 
 `std::vector` and `absl::InlinedVector` fail to compile `insert(const T&)` if `T` is not copy-assignable. `lloyal::InlinedVector` handles this correctly in both inline and heap modes.
+
+**Why This Works:** `std::vector::insert` requires `MoveAssignable` when shifting elements in-place during insertion. For non-assignable types (e.g., types with `const` members), this requirement makes the operation ill-formed. Our rebuild-and-swap approach uses only construction/destruction, bypassing this requirement entirely. See: [std::vector::insert requirements](https://en.cppreference.com/w/cpp/container/vector/insert)
 
 ```cpp
 struct NonAssignable {
@@ -338,7 +390,7 @@ path_stack.resize(5); // Back to 5 elements (still on heap)
 path_stack.shrink_to_fit(); // → returns to inline storage!
 
 // No heap allocation remains.
-// Note: absl/boost implementations cannot transition back to inline.
+// Note: Abseil master also supports this; Boost permanently stays on heap.
 assert(path_stack.capacity() == 16);
 ```
 
@@ -461,15 +513,22 @@ vec.insert(vec.begin(), NonAssignable{99});
 
 ## Version History
 
-  * **v5.7** (2025-01-26): Production ready
-      * Replaced `TailGuard` with `try/catch` to fix Clang linker errors (ODR violation).
-      * Rebuilt heap `insert`/`erase` logic to support non-assignable types.
-      * Comprehensive test suite: 11/12 unit tests + 8/8 fuzz tests passing.
-      * Zero sanitizer violations (ASan/UBSan clean).
+  * **v5.7** (2025-01-26): Production ready - **Allocator-Aware Release**
+      * **Major Feature:** Full allocator-awareness with parent pointer architecture
+        * All element construction/destruction via `AllocTraits::construct/destroy` using owning allocator
+        * Correct allocator propagation (POCMA, POCS, SOCCC)
+        * Parent pointer retargeting for swap and move operations
+        * **ABI Breaking Change:** Added `parent_` pointer to `InlineBuf` (not binary-compatible with v5.6)
+      * **C++17 Compatibility:** Added polyfill for `std::construct_at` (C++20 feature)
+      * Replaced `TailGuard` with `try/catch` to fix Clang linker errors (ODR violation)
+      * Rebuilt heap `insert`/`erase` logic to support non-assignable types
+      * Comprehensive test suite: **15/15 unit tests + 9/9 fuzz tests passing** (100%)
+      * **Zero sanitizer violations** (ASan/UBSan clean)
+      * Regression tests for allocator bugs (swap, move, parent retargeting)
   * **v5.2** (2025-01-25):
-      * **Feature:** Added full `std::allocator_traits` support.
-      * Fixed `valueless_by_exception` handling, aliasing bugs, and `nullptr` arithmetic (UB).
-  * **v4.x** (2025-01-25): Initial implementation and iterative refinement.
+      * **Feature:** Added initial `std::allocator_traits` support
+      * Fixed `valueless_by_exception` handling, aliasing bugs, and `nullptr` arithmetic (UB)
+  * **v4.x** (2025-01-25): Initial implementation and iterative refinement
 
 ## Testing
 
@@ -494,14 +553,30 @@ cmake --build build_bench
 
 ### Test Results (v5.7)
 
-  * **Unit Tests**: 11/12 passing (91.7%)
-      * **All functional tests pass.**
-      * 1 test failure ("Reallocation Strong Safety") is a known test configuration issue (it incorrectly tests `std::vector`'s internals), *not* an implementation bug.
+  * **Unit Tests**: 15/15 passing (100%) ✅
       * Tests validate: destructor balance, swap safety, exception safety, edge cases, sentinel pointers, self-aliasing, non-assignable types, allocator support, comparisons, iterator invalidation.
-      * *Note: Some tests may report "negative leaks" (e.g., -6). This is a known artifact of the test's `MyType` counter logic, not an actual memory leak. Overall balance is maintained and ASan is 100% clean.*
-  * **Fuzz Tests**: 8/8 property-based tests passing (100%)
+      * **Regression tests** for allocator-awareness bugs:
+        * TEST 13: InlineBuf::swap allocator mix-up (POCS=true)
+        * TEST 14: parent_ retargeting on mixed swap (inline↔heap)
+        * TEST 15: parent_ retargeting on move assignment
+  * **Fuzz Tests**: 9/9 property-based tests passing (100%) ✅
       * Properties tested: size invariants, copy/move semantics, insert/erase correctness, inline↔heap transitions, element access, swap behavior.
-  * **Sanitizers**: **Zero ASan/UBSan violations** across all tests.
+      * **Regression fuzz tests** for allocator bugs using custom allocators (TestAllocator, TestAllocatorPOCS) and non-assignable types.
+  * **Sanitizers**: **Zero ASan/UBSan violations** across all tests ✅
+
+-----
+
+## Internal Design Notes (For Contributors)
+
+* **Storage:** Uses `std::variant<InlineBuf, std::vector<T, Alloc>>` (`Storage`). `InlineBuf` is a simple struct holding an aligned `std::byte` buffer, size, and a `parent_` pointer.
+* **`InlineBuf::parent_` Invariant:** This pointer **must always** point to the `InlinedVector` instance that currently owns the `InlineBuf` object *within the variant*.
+    * It is initialized in `InlineBuf`'s constructor.
+    * It is **crucial** for routing `construct`/`destroy` calls to the correct allocator instance.
+    * It **must be retargeted** (updated) after any operation that moves an `InlineBuf` from one `InlinedVector`'s `storage_` variant to another's (specifically, in the mixed-mode `swap` and certain `move assignment` paths). `std::variant::swap` and `std::variant::operator=` do *not* update this pointer automatically.
+    * It is **never** swapped by `InlineBuf::swap` itself, as the buffers don't change owners during that operation.
+* **Allocator Usage:** All element lifetime operations funnel through the private helpers `construct_at_`, `destroy_at_`, `destroy_n_`, which directly call `std::allocator_traits` methods on the container's `alloc_` member.
+* **Exception Safety Mechanism:** Strong safety primarily relies on creating temporaries (`InlineBuf tmp` or `HeapVec new_vec`) and swapping them into place only upon success. Recovery from `valueless_by_exception` uses `recover_if_valueless_()` at the start of mutating operations.
+* **C++17 Compatibility:** Uses a polyfill for `std::construct_at` (C++20 feature) to maintain C++17 support while using allocator-aware construction.
 
 ## License
 
