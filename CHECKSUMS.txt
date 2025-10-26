@@ -1,0 +1,27 @@
+Release Checksums for inlined-vector v5.7.0
+============================================
+
+Release URL: https://github.com/lloyal-ai/inlined-vector/releases/tag/5.7.0
+Tarball URL: https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/5.7.0.tar.gz
+File Size: 37 KB (38,076 bytes)
+
+SHA256:
+81cd33f372db7fcde212902b830815b74c4c9147b884e439c205701cd4cdbd08
+
+SHA512:
+45cb97f18053fa3079b4014cdcd5f4ecb1c508ec30160baf04026934e43cf18e67688d70f5499147a208685fcdace587455555a3696ce3aeecf5bc99257d3fc7
+
+Verification Commands:
+----------------------
+
+# Download and verify SHA256
+curl -L -o inlined-vector-5.7.0.tar.gz https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/5.7.0.tar.gz
+echo "81cd33f372db7fcde212902b830815b74c4c9147b884e439c205701cd4cdbd08  inlined-vector-5.7.0.tar.gz" | sha256sum -c
+
+# Verify SHA512
+echo "45cb97f18053fa3079b4014cdcd5f4ecb1c508ec30160baf04026934e43cf18e67688d70f5499147a208685fcdace587455555a3696ce3aeecf5bc99257d3fc7  inlined-vector-5.7.0.tar.gz" | sha512sum -c
+
+Package Manager Files Updated:
+-------------------------------
+✅ portfile.cmake (vcpkg) - SHA512 added
+✅ conandata.yml (Conan) - SHA256 added
