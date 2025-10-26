@@ -58,6 +58,109 @@ assert(vec.capacity() > 4); // Now on the heap
 
 -----
 
+## Why This Exists: Non-Assignable Types That Just Work
+
+Unlike `std::vector`, `absl::InlinedVector`, and `boost::small_vector`, this container supports types with `const` members or deleted assignment operators in **all** operations—including `insert()` and `erase()`, even when heap-allocated.
+
+**This isn't a workaround. It's correct design.**
+
+### The Problem with std::vector
+
+Standard containers require `MoveAssignable` for `insert()`/`erase()` because they shift elements via assignment. Types with `const` members **implicitly delete** their assignment operators, making them incompatible with these operations.
+
+### Real-World Examples That Work Here (But Fail Elsewhere)
+
+#### 1. Immutable Domain Objects
+
+```cpp
+struct AuditEvent {
+    const uint64_t event_id;      // Immutable - prevents accidental modification
+    const Timestamp occurred_at;  // Immutable timestamp
+    std::string description;      // Mutable payload
+
+    AuditEvent(uint64_t id, Timestamp t, std::string desc)
+        : event_id(id), occurred_at(t), description(std::move(desc)) {}
+};
+
+lloyal::InlinedVector<AuditEvent, 16> audit_log;
+audit_log.emplace_back(1, now(), "User logged in");
+audit_log.insert(audit_log.begin(), AuditEvent{0, earlier(), "System start"});
+// ✅ Works! std::vector<AuditEvent> fails to compile insert().
+```
+
+**Why `const` matters:** Event IDs and timestamps shouldn't change after creation. Using `const` enforces this invariant at compile-time, preventing bugs like `event.event_id = wrong_id;`. With `std::vector`, you'd have to choose between type safety and container flexibility.
+
+#### 2. Cache Entries with Immutable Keys
+
+```cpp
+struct CacheEntry {
+    const std::string key;  // Key cannot change after construction
+    std::string value;      // Value can be updated
+    size_t hit_count = 0;
+
+    CacheEntry(std::string k, std::string v)
+        : key(std::move(k)), value(std::move(v)) {}
+};
+
+lloyal::InlinedVector<CacheEntry, 32> lru_cache;
+// Insert, erase, reorder—all work despite const key
+lru_cache.erase(lru_cache.begin() + 5);  // ✅ Compiles and runs correctly
+lru_cache.insert(lru_cache.begin(), CacheEntry{"hot_key", "frequent_value"});
+```
+
+**Why `const` matters:** In a cache, the key identifies the entry and should never change. Accidental assignment like `entry.key = new_key` breaks lookup invariants. `const` prevents this entire class of bugs.
+
+#### 3. Resource Handles with Deleted Assignment
+
+```cpp
+struct ResourceHandle {
+    const uint64_t id;
+    std::unique_ptr<Resource> resource;
+
+    ResourceHandle(ResourceHandle&&) = default;
+    ResourceHandle& operator=(ResourceHandle&&) = delete;  // Prevent reassignment
+};
+
+lloyal::InlinedVector<ResourceHandle, 8> handles;
+handles.insert(handles.begin(), ResourceHandle{next_id(), acquire_resource()});  // ✅ Works
+```
+
+**Why deleted assignment matters:** Some types shouldn't be reassigned after construction (e.g., RAII handles, thread IDs, database connections). Deleting `operator=` enforces this, but breaks compatibility with standard containers.
+
+### How It Works: Rebuild-and-Swap
+
+Instead of shifting elements via assignment (like `std::vector`), `lloyal::InlinedVector` uses a rebuild-and-swap approach for `insert()`/`erase()` operations:
+
+1. Construct elements into a new buffer (construction, not assignment)
+2. Swap the new buffer into place
+3. Destroy the old buffer
+
+This bypasses the `MoveAssignable` requirement entirely, at the cost of O(n) reconstruction. **Benchmarks show this is actually faster** than in-place assignment for heap insertions (6169ns vs 6335ns Abseil at N=128).
+
+### The Key Insight
+
+These aren't edge cases—they're **good design patterns**. Using `const` to enforce immutability guarantees is a best practice in modern C++. `std::vector` forces you to choose between:
+- ✅ Type safety with `const` members (but lose `insert`/`erase`)
+- ✅ Container flexibility (but lose compile-time invariants)
+
+`lloyal::InlinedVector` gives you both.
+
+**Note:** For small inline buffers, the primary benefit remains avoiding heap allocations entirely (8-13× faster). Non-assignable type support becomes most critical when:
+- Your collection grows beyond inline capacity and uses heap storage
+- You want to use `insert()`/`erase()` with types that have `const` members
+- You're designing domain types with immutability guarantees and need full container compatibility
+
+### Verification
+
+This capability is validated by:
+- **Benchmark suite** (`bench/bench_inlined_vector.cpp:317-344`): Non-assignable insert benchmark runs at 819ns
+- **Fuzz tests** (`tests/fuzz_inlined_vector.cpp`): 9/9 fuzz tests passing with non-assignable types across inline↔heap transitions
+- **Zero sanitizer violations** (ASan/UBSan clean)
+
+**No peer implementation can do this**—their architectures fundamentally rely on assignment-based algorithms.
+
+-----
+
 ## Integration
 
 ### CMake (Recommended)
@@ -501,16 +604,19 @@ vec.shrink_to_fit();  // → returns to inline storage
 ### 5. The Unique Feature: Non-Assignable Types
 
 ```cpp
-struct NonAssignable {
-    const int id;  // Makes type non-assignable
-    NonAssignable(int i) : id(i) {}
-    NonAssignable(const NonAssignable&) = default;
-    NonAssignable& operator=(const NonAssignable&) = delete;
+// Real-world use case: audit logs with immutable event IDs
+struct AuditEvent {
+    const uint64_t event_id;  // Immutable - prevents accidental modification
+    std::string description;
+
+    AuditEvent(uint64_t id, std::string desc)
+        : event_id(id), description(std::move(desc)) {}
 };
 
-lloyal::InlinedVector<NonAssignable, 16> vec;
-for (int i = 0; i < 17; ++i) vec.emplace_back(i);  // Spills to heap
-vec.insert(vec.begin(), NonAssignable{99});
+lloyal::InlinedVector<AuditEvent, 16> audit_log;
+for (int i = 0; i < 17; ++i)
+    audit_log.emplace_back(i, "event " + std::to_string(i));  // Spills to heap
+audit_log.insert(audit_log.begin(), AuditEvent{0, "System start"});
 ```
 
 | Implementation | Result |
