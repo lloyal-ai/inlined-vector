@@ -4,7 +4,7 @@
 #include <memory> // For std::unique_ptr
 
 // The competitors
-#include <inlined_vector.hpp> // Your v5.7
+#include "inlined_vector.hpp" // Your v5.7+
 #include "absl/container/inlined_vector.h"
 #include "boost/container/small_vector.hpp"
 
@@ -23,10 +23,30 @@ static TrivialType g_trivial_val = 42;
 static ComplexType g_complex_val = "hello world a longer string";
 static auto g_move_val = [] { return std::make_unique<int>(42); };
 
+// --- Simple Benchmark Allocator ---
+// (Minimal overhead, no tracking, stateful via ID)
+template <typename T> struct BenchAllocator {
+    using value_type = T;
+    int id = 0; // State to make it non-trivial
+
+    BenchAllocator(int i = 0) noexcept : id(i) {}
+    template <typename U> BenchAllocator(const BenchAllocator<U>& other) noexcept : id(other.id) {}
+
+    T* allocate(std::size_t n) { return std::allocator<T>{}.allocate(n); }
+    void deallocate(T* p, std::size_t n) { std::allocator<T>{}.deallocate(p, n); }
+
+    // Use default construct/destroy from std::allocator_traits
+    using propagate_on_container_copy_assignment = std::false_type;
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::false_type;
+    using is_always_equal = std::false_type; // Not always equal due to id
+
+    friend bool operator==(const BenchAllocator& a, const BenchAllocator& b) { return a.id == b.id; }
+    friend bool operator!=(const BenchAllocator& a, const BenchAllocator& b) { return a.id != b.id; }
+};
+
 // =========================================================================
 // BENCHMARK 1: Fill (push_back)
-// Measures: Construction + N push_backs.
-// This clearly shows the SBO performance "cliff" when state.range(0) > N.
 // =========================================================================
 
 // --- Trivial Type: uint64_t ---
@@ -38,7 +58,7 @@ static void BM_Fill_Trivial(benchmark::State& state) {
         for (size_t i = 0; i < n; ++i) {
             vec.push_back(g_trivial_val);
         }
-        benchmark::ClobberMemory(); // Prevent optimization
+        benchmark::ClobberMemory();
     }
 }
 BENCHMARK_TEMPLATE(BM_Fill_Trivial, std::vector<TrivialType>)->Range(1, 128);
@@ -63,11 +83,26 @@ BENCHMARK_TEMPLATE(BM_Fill_Complex, lloyal::InlinedVector<ComplexType, kInlineCa
 BENCHMARK_TEMPLATE(BM_Fill_Complex, absl::InlinedVector<ComplexType, kInlineCapacity>)->Range(1, 128);
 BENCHMARK_TEMPLATE(BM_Fill_Complex, boost::container::small_vector<ComplexType, kInlineCapacity>)->Range(1, 128);
 
+// --- Complex Type with Custom Allocator ---
+template <typename VecType>
+static void BM_Fill_Complex_Alloc(benchmark::State& state) {
+    const size_t n = state.range(0);
+    BenchAllocator<ComplexType> alloc(1); // Create allocator instance
+    for (auto _ : state) {
+        VecType vec(alloc); // Construct with allocator
+        for (size_t i = 0; i < n; ++i) {
+            vec.push_back(g_complex_val);
+        }
+        benchmark::ClobberMemory();
+    }
+}
+// Compare lloyal vs std::vector with the same custom allocator
+BENCHMARK_TEMPLATE(BM_Fill_Complex_Alloc, std::vector<ComplexType, BenchAllocator<ComplexType>>)->Range(1, 128);
+BENCHMARK_TEMPLATE(BM_Fill_Complex_Alloc, lloyal::InlinedVector<ComplexType, kInlineCapacity, BenchAllocator<ComplexType>>)->Range(1, 128);
+
 
 // =========================================================================
 // BENCHMARK 2: Reserve
-// Measures: Cost of calling reserve(n).
-// SBO containers should be a no-op for n <= N.
 // =========================================================================
 
 template <typename VecType>
@@ -87,9 +122,10 @@ BENCHMARK_TEMPLATE(BM_Reserve, boost::container::small_vector<TrivialType, kInli
 
 // =========================================================================
 // BENCHMARK 3: Copy Construction
-// Measures: Cost of copy-constructing a vector of size N.
 // =========================================================================
 
+// NOTE: Previous runs showed potential timer issues with this benchmark across all types.
+// Keeping it for comparison, but results may need scrutiny.
 template <typename VecType>
 static void BM_CopyConstruct(benchmark::State& state) {
     const size_t n = state.range(0);
@@ -110,9 +146,6 @@ BENCHMARK_TEMPLATE(BM_CopyConstruct, boost::container::small_vector<ComplexType,
 
 // =========================================================================
 // BENCHMARK 4: Move Construction
-// Measures: Cost of move-constructing a vector of size N.
-// SBO containers will be O(N) (element-wise move) when inline,
-// but O(1) (pointer swap) when on heap.
 // =========================================================================
 
 template <typename VecType>
@@ -133,10 +166,27 @@ BENCHMARK_TEMPLATE(BM_MoveConstruct, lloyal::InlinedVector<ComplexType, kInlineC
 BENCHMARK_TEMPLATE(BM_MoveConstruct, absl::InlinedVector<ComplexType, kInlineCapacity>)->Range(1, 128);
 BENCHMARK_TEMPLATE(BM_MoveConstruct, boost::container::small_vector<ComplexType, kInlineCapacity>)->Range(1, 128);
 
+// --- Move Construction with Custom Allocator ---
+template <typename VecType>
+static void BM_MoveConstruct_Alloc(benchmark::State& state) {
+    const size_t n = state.range(0);
+    BenchAllocator<ComplexType> alloc(1);
+    for (auto _ : state) {
+        state.PauseTiming();
+        VecType source_vec(alloc);
+        for(size_t i = 0; i < n; ++i) source_vec.push_back(g_complex_val);
+        state.ResumeTiming();
+
+        VecType move_vec(std::move(source_vec)); // Allocator should propagate (POCMA=true)
+        benchmark::ClobberMemory();
+    }
+}
+BENCHMARK_TEMPLATE(BM_MoveConstruct_Alloc, std::vector<ComplexType, BenchAllocator<ComplexType>>)->Range(1, 128);
+BENCHMARK_TEMPLATE(BM_MoveConstruct_Alloc, lloyal::InlinedVector<ComplexType, kInlineCapacity, BenchAllocator<ComplexType>>)->Range(1, 128);
+
+
 // =========================================================================
 // BENCHMARK 5: Insert at Front
-// Measures: Cost of inserting at begin(), forcing all elements to shift.
-// This highlights the "rebuild-and-swap" cost for `lloyal` on the heap.
 // =========================================================================
 
 // --- Trivial Type ---
@@ -177,6 +227,24 @@ BENCHMARK_TEMPLATE(BM_InsertFront_Complex, lloyal::InlinedVector<ComplexType, kI
 BENCHMARK_TEMPLATE(BM_InsertFront_Complex, absl::InlinedVector<ComplexType, kInlineCapacity>)->Range(1, 128);
 BENCHMARK_TEMPLATE(BM_InsertFront_Complex, boost::container::small_vector<ComplexType, kInlineCapacity>)->Range(1, 128);
 
+// --- Complex Type with Custom Allocator ---
+template <typename VecType>
+static void BM_InsertFront_Complex_Alloc(benchmark::State& state) {
+    const size_t n = state.range(0);
+    BenchAllocator<ComplexType> alloc(1);
+    for (auto _ : state) {
+        state.PauseTiming();
+        VecType vec(alloc);
+        for(size_t i = 0; i < n; ++i) vec.push_back(g_complex_val);
+        state.ResumeTiming();
+
+        vec.insert(vec.begin(), g_complex_val);
+        benchmark::ClobberMemory();
+    }
+}
+BENCHMARK_TEMPLATE(BM_InsertFront_Complex_Alloc, std::vector<ComplexType, BenchAllocator<ComplexType>>)->Range(1, 128);
+BENCHMARK_TEMPLATE(BM_InsertFront_Complex_Alloc, lloyal::InlinedVector<ComplexType, kInlineCapacity, BenchAllocator<ComplexType>>)->Range(1, 128);
+
 // --- Move-Only Type ---
 template <typename VecType>
 static void BM_InsertFront_MoveOnly(benchmark::State& state) {
@@ -198,8 +266,6 @@ BENCHMARK_TEMPLATE(BM_InsertFront_MoveOnly, boost::container::small_vector<MoveO
 
 // =========================================================================
 // BENCHMARK 6: Erase from Front
-// Measures: Cost of erasing at begin(), forcing all elements to shift.
-// This also highlights the "rebuild-and-swap" cost for `lloyal` on the heap.
 // =========================================================================
 
 // --- Trivial Type ---
@@ -246,50 +312,63 @@ BENCHMARK_TEMPLATE(BM_EraseFront_Complex, boost::container::small_vector<Complex
 
 // =========================================================================
 // BENCHMARK 7: Non-Assignable Type Insert (The "Killer Feature")
-// Measures: The ability of `lloyal::InlinedVector` to perform an `insert`
-// on a non-assignable type when heap-allocated.
 // =========================================================================
 
 struct NonAssignable {
-    const int val; // const makes it non-assignable
+    const int val;
     NonAssignable(int v = 0) : val(v) {}
-
-    // Movable and Copyable (constructors)
     NonAssignable(const NonAssignable&) = default;
     NonAssignable(NonAssignable&&) = default;
-
-    // NOT Assignable
     NonAssignable& operator=(const NonAssignable&) = delete;
     NonAssignable& operator=(NonAssignable&&) = delete;
 };
 
 template <typename VecType>
 static void BM_InsertFront_NonAssignable(benchmark::State& state) {
-    // We only test a heap-allocated size
-    const size_t n = state.range(0);
+    const size_t n = state.range(0); // Test both inline and heap
     for (auto _ : state) {
         state.PauseTiming();
         VecType vec;
-        for(size_t i = 0; i < n; ++i) vec.emplace_back(i);
+        for(size_t i = 0; i < n; ++i) vec.emplace_back(i); // Use emplace_back
         state.ResumeTiming();
         
-        // This operation will compile for lloyal::InlinedVector
-        // but fail to compile for all others.
         vec.insert(vec.begin(), NonAssignable(42));
         benchmark::ClobberMemory();
     }
 }
 
-// NOTE: We only run this benchmark for lloyal::InlinedVector.
-// The other lines are commented out because they will fail to compile,
-// which *proves* the feature.
+// ** FIX: Run for both inline (N/2) and heap (N+1) sizes **
 BENCHMARK_TEMPLATE(BM_InsertFront_NonAssignable, lloyal::InlinedVector<NonAssignable, kInlineCapacity>)
-    ->Range(kInlineCapacity + 1, kInlineCapacity + 1);
+    ->Ranges({{kInlineCapacity / 2, kInlineCapacity / 2}, {kInlineCapacity + 1, kInlineCapacity + 1}});
 
-// --- UNCOMMENT THE LINES BELOW TO VERIFY COMPILE-TIME FAILURE ---
-// BENCHMARK_TEMPLATE(BM_InsertFront_NonAssignable, std::vector<NonAssignable>)
-//     ->Range(kInlineCapacity + 1, kInlineCapacity + 1);
-// BENCHMARK_TEMPLATE(BM_InsertFront_NonAssignable, absl::InlinedVector<NonAssignable, kInlineCapacity>)
-//     ->Range(kInlineCapacity + 1, kInlineCapacity + 1);
-// BENCHMARK_TEMPLATE(BM_InsertFront_NonAssignable, boost::container::small_vector<NonAssignable, kInlineCapacity>)
-//     ->Range(kInlineCapacity + 1, kInlineCapacity + 1);
+// (Other implementations still commented out as they won't compile)
+
+// =========================================================================
+// BENCHMARK 8: Shrink To Fit (Heap -> Inline Transition)
+// =========================================================================
+
+template <typename VecType>
+static void BM_ShrinkToFit(benchmark::State& state) {
+    // Start slightly above inline capacity, shrink back down
+    const size_t start_size = kInlineCapacity + 5;
+    const size_t end_size = kInlineCapacity / 2;
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        VecType vec;
+        for(size_t i = 0; i < start_size; ++i) vec.push_back(g_complex_val);
+        vec.resize(end_size); // Resize down while still on heap
+        state.ResumeTiming();
+
+        vec.shrink_to_fit(); // The operation to measure
+        benchmark::ClobberMemory();
+    }
+}
+// std::vector might reallocate, lloyal will move elements and deallocate
+BENCHMARK_TEMPLATE(BM_ShrinkToFit, std::vector<ComplexType>);
+BENCHMARK_TEMPLATE(BM_ShrinkToFit, lloyal::InlinedVector<ComplexType, kInlineCapacity>);
+// Note: absl/boost do not transition back to inline, so their shrink_to_fit is different
+
+
+// --- Main ---
+BENCHMARK_MAIN();

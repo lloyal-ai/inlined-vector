@@ -86,7 +86,7 @@ if(INLINED_VECTOR_BUILD_BENCHMARKS)
     FetchContent_Declare(
         abseil-cpp
         GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-        GIT_TAG 20240116.2
+        GIT_TAG master
     )
     FetchContent_MakeAvailable(abseil-cpp)
 
