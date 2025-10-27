@@ -214,6 +214,33 @@ jobs:
           ./test_include
 
   # ============================================================================
+  # Example Build Check
+  # ============================================================================
+  examples:
+    name: Build and Run Examples
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-12
+
+      - name: Build Example
+        run: |
+          cmake -S examples/minimal -B examples/minimal/build \
+            -DCMAKE_CXX_COMPILER=g++-12 \
+            -DCMAKE_C_COMPILER=gcc-12 \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build examples/minimal/build -j
+
+      - name: Run Example
+        run: ./examples/minimal/build/minimal_example
+
+  # ============================================================================
   # Code Coverage (Optional - only on main branch)
   # ============================================================================
   coverage:

@@ -1,6 +1,7 @@
 # `InlinedVector`
 
 [![CI](https://github.com/lloyal-ai/inlined-vector/actions/workflows/ci.yml/badge.svg)](https://github.com/lloyal-ai/inlined-vector/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/lloyal-ai/inlined-vector/branch/main/graph/badge.svg)](https://codecov.io/gh/lloyal-ai/inlined-vector)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17%2F20-blue.svg)](https://en.cppreference.com/w/cpp/17)
 
@@ -28,7 +29,7 @@ This container is a production-ready, drop-in replacement for `std::vector` in s
   * **Robust Exception Safety**: Provides the **strong exception guarantee** for most operations by default, using internal rebuild-and-swap where necessary. Clearly defines the **single specific scenario** (inline insert fast-path with throwing copy assignment) where the basic guarantee applies, and safely handles the `valueless_by_exception` state through automatic recovery on mutation.
   * **Sanitizer-Clean**: Verified clean with AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan).
   * **Fuzz-Tested**: Validated against Google FuzzTest for property-based correctness.
-  * **Compact Implementation**: \~965 lines in a single header with comprehensive comments explaining design decisions.
+  * **Compact Implementation**: ~760 lines of code in a single header (~1,030 total including comprehensive comments explaining design decisions).
 
 ## Quick Start
 
