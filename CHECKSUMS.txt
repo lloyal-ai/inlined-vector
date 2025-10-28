@@ -1,25 +1,25 @@
-Release Checksums for inlined-vector v5.7.0
+Release Checksums for inlined-vector v5.7.1
 ============================================
 
-Release URL: https://github.com/lloyal-ai/inlined-vector/releases/tag/5.7.0
-Tarball URL: https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/5.7.0.tar.gz
-File Size: 37 KB (38,076 bytes)
+Release URL: https://github.com/lloyal-ai/inlined-vector/releases/tag/v5.7.1
+Tarball URL: https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/v5.7.1.tar.gz
+File Size: 48 KB (49,418 bytes)
 
 SHA256:
-81cd33f372db7fcde212902b830815b74c4c9147b884e439c205701cd4cdbd08
+5236a8db61d610eee164d4b4199ff4ccdaa1d80cdc4609b3c320259d7c3a4805
 
 SHA512:
-45cb97f18053fa3079b4014cdcd5f4ecb1c508ec30160baf04026934e43cf18e67688d70f5499147a208685fcdace587455555a3696ce3aeecf5bc99257d3fc7
+619777f8dd930813e5be96cdfa5171485356fb8ac6ed3f32fca3ad68565a48c269a38a022d734b118c0e397f5f84ad591a27c42b7080616af5d7d0575e6a7a9b
 
 Verification Commands:
 ----------------------
 
 # Download and verify SHA256
-curl -L -o inlined-vector-5.7.0.tar.gz https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/5.7.0.tar.gz
-echo "81cd33f372db7fcde212902b830815b74c4c9147b884e439c205701cd4cdbd08  inlined-vector-5.7.0.tar.gz" | sha256sum -c
+curl -L -o inlined-vector-5.7.1.tar.gz https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/v5.7.1.tar.gz
+echo "5236a8db61d610eee164d4b4199ff4ccdaa1d80cdc4609b3c320259d7c3a4805  inlined-vector-5.7.1.tar.gz" | sha256sum -c
 
 # Verify SHA512
-echo "45cb97f18053fa3079b4014cdcd5f4ecb1c508ec30160baf04026934e43cf18e67688d70f5499147a208685fcdace587455555a3696ce3aeecf5bc99257d3fc7  inlined-vector-5.7.0.tar.gz" | sha512sum -c
+echo "619777f8dd930813e5be96cdfa5171485356fb8ac6ed3f32fca3ad68565a48c269a38a022d734b118c0e397f5f84ad591a27c42b7080616af5d7d0575e6a7a9b  inlined-vector-5.7.1.tar.gz" | sha512sum -c
 
 Package Manager Files Updated:
 -------------------------------
