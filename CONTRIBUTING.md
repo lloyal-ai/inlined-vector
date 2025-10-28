@@ -103,7 +103,7 @@ Fixes #123
 feat: Add support for custom comparison operators
 fix: Correct parent pointer retargeting in move assignment
 perf: Optimize inline insert path for trivial types
-docs: Update benchmark results for v5.7.0
+docs: Update benchmark results for v5.7.1
 ```
 
 ## Bug Reports
@@ -153,7 +153,7 @@ Required files (see local package manager files for templates):
 - `portfile.cmake` - Build instructions
 - `usage` - Usage documentation
 
-Submit PR with title: `[inlined-vector] new port`
+Submit PR with title: `[lloyal-ai-inlined-vector] new port`
 
 ### Conan Recipe
 Repository: https://github.com/conan-io/conan-center-index
@@ -163,7 +163,7 @@ Required files:
 - `conandata.yml` - Source URLs and checksums
 - `config.yml` - Version mapping
 
-Submit PR with title: `(inlined-vector/5.7.0) new recipe`
+Submit PR with title: `(inlined-vector/5.7.1) new recipe`
 
 ### Other Package Managers
 - **Meson WrapDB**: https://github.com/mesonbuild/wrapdb

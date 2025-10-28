@@ -16,7 +16,7 @@ vcpkg_cmake_configure(
 )
 
 vcpkg_cmake_install()
-vcpkg_cmake_config_fixup(CONFIG_PATH lib/cmake/inlined-vector)
+vcpkg_cmake_config_fixup(CONFIG_PATH share/inlined-vector/cmake)
 
 # Header-only library - remove empty lib directories
 file(REMOVE_RECURSE "${CURRENT_PACKAGES_DIR}/debug" "${CURRENT_PACKAGES_DIR}/lib")

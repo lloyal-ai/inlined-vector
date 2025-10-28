@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(inlined-vector VERSION 5.7.0 LANGUAGES CXX)
+project(inlined-vector VERSION 5.7.1 LANGUAGES CXX)
 
 # C++ Standard
 set(CMAKE_CXX_STANDARD 20)
@@ -134,13 +134,13 @@ install(TARGETS inlined-vector
 install(EXPORT inlined-vector-targets
     FILE inlined-vector-targets.cmake
     NAMESPACE inlined-vector::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/inlined-vector
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/cmake/inlined-vector
 )
 
 configure_package_config_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/inlined-vector-config.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/inlined-vector-config.cmake
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/inlined-vector
+    INSTALL_DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/cmake/inlined-vector
 )
 
 write_basic_package_version_file(
@@ -152,5 +152,5 @@ write_basic_package_version_file(
 install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/inlined-vector-config.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/inlined-vector-config-version.cmake
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/inlined-vector
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/cmake/inlined-vector
 )

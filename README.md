@@ -180,7 +180,7 @@ include(FetchContent)
 FetchContent_Declare(
     inlined_vector
     GIT_REPOSITORY https://github.com/lloyal-ai/inlined-vector.git
-    GIT_TAG v5.7.0
+    GIT_TAG v5.7.1
 )
 FetchContent_MakeAvailable(inlined_vector)
 target_link_libraries(your_target PRIVATE inlined-vector::inlined-vector)
@@ -193,6 +193,10 @@ This is a single-header library. Simply copy `include/inlined_vector.hpp` to you
 ```cpp
 #include "inlined_vector.hpp"
 ```
+
+### Install Layout
+
+When using `cmake --install`, CMake config files install to `share/cmake/inlined-vector/` (header-only library convention). Use `find_package(inlined-vector CONFIG REQUIRED)` to locate them automatically.
 
 -----
 

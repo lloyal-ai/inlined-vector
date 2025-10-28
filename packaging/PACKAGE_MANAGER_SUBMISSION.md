@@ -6,10 +6,42 @@ This document provides step-by-step instructions for submitting `inlined-vector`
 
 Before submitting, ensure:
 
-1. ✅ **GitHub Release Created**: Tag `v5.7.0` must exist with release notes
+1. ✅ **GitHub Release Created**: Tag `v5.7.1` must exist with release notes
 2. ✅ **CI Passing**: All tests must be green on main branch
 3. ✅ **License File**: `LICENSE` file exists in repository root
 4. ✅ **CMake Package Config**: `inlined-vectorConfig.cmake` is generated correctly
+
+---
+
+## Install Layout
+
+This library follows header-only CMake conventions:
+
+- **Headers**: `${CMAKE_INSTALL_INCLUDEDIR}/` (typically `include/`)
+- **CMake configs**: `${CMAKE_INSTALL_DATAROOTDIR}/cmake/inlined-vector/` (typically `share/cmake/inlined-vector/`)
+
+### Rationale
+
+We use `CMAKE_INSTALL_DATAROOTDIR` instead of `CMAKE_INSTALL_LIBDIR` because:
+1. This is a header-only library (no compiled binaries)
+2. Follows pybind11 and other header-only library conventions
+3. `share/` is semantically correct for architecture-independent files
+4. Eliminates empty `lib/` directory issues in package managers
+
+### Version History
+
+- **v5.7.1+**: Configs in `share/cmake/inlined-vector/`
+- **v5.7.0**: Configs in `lib/cmake/inlined-vector/` (non-standard, corrected in v5.7.1)
+
+### Package Manager Specifics
+
+#### vcpkg
+Use `CONFIG_PATH share/inlined-vector/cmake` in `vcpkg_cmake_config_fixup()`.
+No manual cleanup of `lib/` directory needed.
+
+#### Conan
+Standard header-only recipe. CMake will find configs automatically.
+Set `self.cpp_info.set_property("cmake_find_mode", "both")` for compatibility.
 
 ---
 
@@ -28,8 +60,8 @@ vcpkg is Microsoft's C++ package manager with 2000+ packages.
 #### Step 1: Create GitHub Release
 ```bash
 # Tag the release
-git tag -a v5.7.0 -m "Release v5.7.0 - Allocator-Aware with Zero Overhead"
-git push origin v5.7.0
+git tag -a v5.7.1 -m "Release v5.7.1 - Header-only install path fix"
+git push origin v5.7.1
 
 # Create release on GitHub with release notes
 ```
@@ -37,10 +69,10 @@ git push origin v5.7.0
 #### Step 2: Calculate SHA512
 ```bash
 # Download the release tarball
-wget https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/v5.7.0.tar.gz
+wget https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/v5.7.1.tar.gz
 
 # Calculate SHA512
-sha512sum v5.7.0.tar.gz
+sha512sum v5.7.1.tar.gz
 
 # Update portfile.cmake with the actual SHA512
 ```
@@ -54,10 +86,10 @@ git checkout -b add-inlined-vector
 
 #### Step 4: Create Port Directory
 ```bash
-mkdir -p ports/inlined-vector
-cp /path/to/inlined-vector/vcpkg.json ports/inlined-vector/
-cp /path/to/inlined-vector/portfile.cmake ports/inlined-vector/
-cp /path/to/inlined-vector/usage ports/inlined-vector/
+mkdir -p ports/lloyal-ai-inlined-vector
+cp /path/to/inlined-vector/vcpkg.json ports/lloyal-ai-inlined-vector/
+cp /path/to/inlined-vector/portfile.cmake ports/lloyal-ai-inlined-vector/
+cp /path/to/inlined-vector/usage ports/lloyal-ai-inlined-vector/
 ```
 
 #### Step 5: Test Locally
@@ -66,7 +98,7 @@ cp /path/to/inlined-vector/usage ports/inlined-vector/
 ./bootstrap-vcpkg.sh
 
 # Test the port
-./vcpkg install inlined-vector --overlay-ports=./ports/inlined-vector
+./vcpkg install lloyal-ai-inlined-vector --overlay-ports=./ports/lloyal-ai-inlined-vector
 
 # Test usage
 ./vcpkg integrate install
@@ -74,19 +106,19 @@ cp /path/to/inlined-vector/usage ports/inlined-vector/
 
 #### Step 6: Submit Pull Request
 ```bash
-git add ports/inlined-vector
-git commit -m "[inlined-vector] new port"
+git add ports/lloyal-ai-inlined-vector
+git commit -m "[lloyal-ai-inlined-vector] new port"
 git push origin add-inlined-vector
 ```
 
 Then create a PR at: https://github.com/microsoft/vcpkg/pulls
 
-**PR Title**: `[inlined-vector] new port`
+**PR Title**: `[lloyal-ai-inlined-vector] new port`
 
 **PR Description**:
 ```markdown
 ### Description
-Adds inlined-vector v5.7.0 - A C++17/20 header-only vector with Small Buffer Optimization.
+Adds lloyal-ai-inlined-vector v5.7.1 - A C++17/20 header-only vector with Small Buffer Optimization.
 
 ### Details
 - **Type**: Header-only library
@@ -126,10 +158,10 @@ Conan is a decentralized C++ package manager with 1500+ packages.
 #### Step 1: Calculate SHA256
 ```bash
 # Download the release tarball
-wget https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/v5.7.0.tar.gz
+wget https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/v5.7.1.tar.gz
 
 # Calculate SHA256
-sha256sum v5.7.0.tar.gz
+sha256sum v5.7.1.tar.gz
 
 # Update conandata.yml with the actual SHA256
 ```
@@ -138,7 +170,7 @@ sha256sum v5.7.0.tar.gz
 ```bash
 git clone https://github.com/conan-io/conan-center-index.git
 cd conan-center-index
-git checkout -b inlined-vector/5.7.0
+git checkout -b inlined-vector/5.7.1
 ```
 
 #### Step 3: Create Recipe Directory
@@ -152,7 +184,7 @@ cp /path/to/inlined-vector/conandata.yml recipes/inlined-vector/all/
 ```bash
 cat > recipes/inlined-vector/config.yml << 'EOF'
 versions:
-  "5.7.0":
+  "5.7.1":
     folder: all
 EOF
 ```
@@ -163,27 +195,27 @@ EOF
 pip install conan
 
 # Test the recipe
-conan create recipes/inlined-vector/all --version 5.7.0
+conan create recipes/inlined-vector/all --version 5.7.1
 
 # Test usage
-conan install --requires=inlined-vector/5.7.0@ --build=missing
+conan install --requires=inlined-vector/5.7.1@ --build=missing
 ```
 
 #### Step 6: Submit Pull Request
 ```bash
 git add recipes/inlined-vector
-git commit -m "inlined-vector/5.7.0: new recipe"
-git push origin inlined-vector/5.7.0
+git commit -m "inlined-vector/5.7.1: new recipe"
+git push origin inlined-vector/5.7.1
 ```
 
 Then create a PR at: https://github.com/conan-io/conan-center-index/pulls
 
-**PR Title**: `(inlined-vector/5.7.0) new recipe`
+**PR Title**: `(inlined-vector/5.7.1) new recipe`
 
 **PR Description**:
 ```markdown
 ### Description
-Adds inlined-vector 5.7.0 - A high-performance header-only vector with SBO.
+Adds inlined-vector 5.7.1 - A high-performance header-only vector with SBO.
 
 ### Recipe Details
 - **Type**: Header-only library
@@ -221,9 +253,9 @@ Adds inlined-vector 5.7.0 - A high-performance header-only vector with SBO.
 **Wrap File Template**:
 ```ini
 [wrap-file]
-directory = inlined-vector-5.7.0
-source_url = https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/v5.7.0.tar.gz
-source_filename = inlined-vector-5.7.0.tar.gz
+directory = inlined-vector-5.7.1
+source_url = https://github.com/lloyal-ai/inlined-vector/archive/refs/tags/v5.7.1.tar.gz
+source_filename = inlined-vector-5.7.1.tar.gz
 source_hash = <sha256>
 
 [provide]
@@ -266,7 +298,7 @@ vcpkg install inlined-vector
 
 ### Conan
 \`\`\`bash
-conan install --requires=inlined-vector/5.7.0@
+conan install --requires=inlined-vector/5.7.1@
 \`\`\`
 
 ### CMake FetchContent
@@ -274,7 +306,7 @@ conan install --requires=inlined-vector/5.7.0@
 FetchContent_Declare(
     inlined_vector
     GIT_REPOSITORY https://github.com/lloyal-ai/inlined-vector.git
-    GIT_TAG v5.7.0
+    GIT_TAG v5.7.1
 )
 FetchContent_MakeAvailable(inlined_vector)
 target_link_libraries(your_target PRIVATE inlined-vector::inlined-vector)
@@ -290,14 +322,14 @@ target_link_libraries(your_target PRIVATE inlined-vector::inlined-vector)
 **Problem**: SHA512 mismatch
 ```bash
 # Recalculate SHA512
-sha512sum v5.7.0.tar.gz
+sha512sum v5.7.1.tar.gz
 # Update portfile.cmake
 ```
 
 **Problem**: Build fails
 ```bash
 # Test locally with verbose output
-./vcpkg install inlined-vector --overlay-ports=./ports/inlined-vector --debug
+./vcpkg install lloyal-ai-inlined-vector --overlay-ports=./ports/lloyal-ai-inlined-vector --debug
 ```
 
 ### Conan Issues
@@ -305,13 +337,13 @@ sha512sum v5.7.0.tar.gz
 **Problem**: SHA256 mismatch
 ```bash
 # Update conandata.yml with correct hash
-sha256sum v5.7.0.tar.gz
+sha256sum v5.7.1.tar.gz
 ```
 
 **Problem**: Recipe validation fails
 ```bash
 # Run Conan linter
-conan export recipes/inlined-vector/all --version 5.7.0
+conan export recipes/inlined-vector/all --version 5.7.1
 ```
 
 ---
@@ -330,14 +362,14 @@ conan export recipes/inlined-vector/all --version 5.7.0
 
 ## 7. Success Criteria
 
-✅ **vcpkg**: Port accepted, searchable via `vcpkg search inlined-vector`
-✅ **Conan**: Recipe accepted, installable via `conan install inlined-vector/5.7.0@`
+✅ **vcpkg**: Port accepted, searchable via `vcpkg search lloyal-ai-inlined-vector`
+✅ **Conan**: Recipe accepted, installable via `conan install inlined-vector/5.7.1@`
 ✅ **Documentation**: README updated with installation instructions
 ✅ **Badges**: Add package manager badges to README
 
 **Badges to Add**:
 ```markdown
-[![vcpkg](https://img.shields.io/vcpkg/v/inlined-vector)](https://vcpkg.link/ports/inlined-vector)
+[![vcpkg](https://img.shields.io/vcpkg/v/lloyal-ai-inlined-vector)](https://vcpkg.link/ports/lloyal-ai-inlined-vector)
 [![Conan Center](https://shields.io/conan/v/inlined-vector)](https://conan.io/center/recipes/inlined-vector)
 ```
 
