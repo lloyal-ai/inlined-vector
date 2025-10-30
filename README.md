@@ -59,11 +59,34 @@ assert(vec.capacity() > 4); // Now on the heap
 
 -----
 
-## Why This Exists: Non-Assignable Types That Just Work
+## Why This Exists: Supporting Non-Assignable Types
 
 Unlike `std::vector`, `absl::InlinedVector`, and `boost::small_vector`, this container supports types with `const` members or deleted assignment operators in **all** operations—including `insert()` and `erase()`, even when heap-allocated.
 
-**This isn't a workaround. It's correct design.**
+**This capability is technically valid but reflects a contested design choice in the C++ community.**
+
+### The Design Debate
+
+The use of `const` data members in value-semantic types is a long-standing point of disagreement:
+
+**Arguments for `const` members:**
+- Enforces immutability guarantees at compile-time
+- Prevents accidental modification bugs (e.g., `event.event_id = wrong_id;`)
+- Makes invariants explicit in the type system
+- Provides zero-cost abstraction in some embedded contexts
+
+**C++ Expert Consensus (Against):**
+
+The STL's design philosophy, articulated by its creators and maintainers, holds that `const` data members break value semantics:
+
+- **Howard Hinnant** (STL implementer): "We didn't design containers to hold const T" — an intentional design decision.
+- **Herb Sutter** (ISO C++ committee chair): Advocates achieving immutability through `const` objects and member functions, not `const` members. "const means read-only or safe to read concurrently" at the object level.
+- **Google Abseil Team** (Tip #177): "Definitely don't const-qualify the data members of value-semantic class types... that is often a bad tradeoff."
+- **Alexander Stepanov** (STL architect): Containers are designed around "Regular types" that behave like mathematical values—requiring efficient assignment for generic algorithms.
+
+The consensus: `const` members violate the "Regular type" concept by conflating logical immutability (value shouldn't change from the outside) with physical immutability (bits can't be overwritten via assignment).
+
+**This library's position:** Whether you agree with the expert consensus or have use cases that justify `const` members (embedded systems, policy enforcement, domain modeling), this container ensures you're not locked out of dynamic collections. We support the pattern while acknowledging the debate.
 
 ### The Problem with std::vector
 
@@ -89,7 +112,30 @@ audit_log.insert(audit_log.begin(), AuditEvent{0, earlier(), "System start"});
 // ✅ Works! std::vector<AuditEvent> fails to compile insert().
 ```
 
-**Why `const` matters:** Event IDs and timestamps shouldn't change after creation. Using `const` enforces this invariant at compile-time, preventing bugs like `event.event_id = wrong_id;`. With `std::vector`, you'd have to choose between type safety and container flexibility.
+**Why `const` is used here:** Event IDs and timestamps shouldn't change after creation. Using `const` enforces this invariant at compile-time, preventing bugs like `event.event_id = wrong_id;`.
+
+**Expert-Recommended Alternative:**
+```cpp
+class AuditEvent {
+    uint64_t event_id_;      // Private, not const
+    Timestamp occurred_at_;  // Private, not const
+    std::string description_;
+
+public:
+    AuditEvent(uint64_t id, Timestamp t, std::string desc)
+        : event_id_(id), occurred_at_(t), description_(std::move(desc)) {}
+
+    // Immutability via interface, not const members
+    uint64_t event_id() const { return event_id_; }
+    Timestamp occurred_at() const { return occurred_at_; }
+    std::string& description() { return description_; }
+    const std::string& description() const { return description_; }
+    
+    // No setters for id/timestamp = logically immutable
+    // Assignment works = container-compatible
+};
+```
+**Tradeoff:** More boilerplate and runtime overhead for accessor calls, but works with all standard containers and follows STL design principles. Choose `const` members when compile-time enforcement outweighs container compatibility concerns.
 
 #### 2. Cache Entries with Immutable Keys
 
@@ -109,7 +155,28 @@ lru_cache.erase(lru_cache.begin() + 5);  // ✅ Compiles and runs correctly
 lru_cache.insert(lru_cache.begin(), CacheEntry{"hot_key", "frequent_value"});
 ```
 
-**Why `const` matters:** In a cache, the key identifies the entry and should never change. Accidental assignment like `entry.key = new_key` breaks lookup invariants. `const` prevents this entire class of bugs.
+**Why `const` is used here:** In a cache, the key identifies the entry and should never change. Accidental assignment like `entry.key = new_key` breaks lookup invariants.
+
+**Expert-Recommended Alternative:**
+```cpp
+class CacheEntry {
+    std::string key_;  // Private, not const
+    std::string value_;
+    size_t hit_count_ = 0;
+
+public:
+    CacheEntry(std::string k, std::string v)
+        : key_(std::move(k)), value_(std::move(v)) {}
+
+    const std::string& key() const { return key_; }  // Read-only access
+    std::string& value() { return value_; }
+    size_t hit_count() const { return hit_count_; }
+    void increment_hits() { ++hit_count_; }
+    
+    // Works with std::vector, assignment operator not deleted
+};
+```
+**Tradeoff:** Key is logically immutable but physically assignable. This is the pattern recommended by Herb Sutter for achieving "const-correctness" without breaking assignability.
 
 #### 3. Resource Handles with Deleted Assignment
 
@@ -126,7 +193,26 @@ lloyal::InlinedVector<ResourceHandle, 8> handles;
 handles.insert(handles.begin(), ResourceHandle{next_id(), acquire_resource()});  // ✅ Works
 ```
 
-**Why deleted assignment matters:** Some types shouldn't be reassigned after construction (e.g., RAII handles, thread IDs, database connections). Deleting `operator=` enforces this, but breaks compatibility with standard containers.
+**Why deleted assignment is used here:** Some types shouldn't be reassigned after construction (e.g., RAII handles, thread IDs, database connections). Deleting `operator=` enforces this.
+
+**Expert-Recommended Alternative:**
+```cpp
+class ResourceHandle {
+    uint64_t id_;  // Not const
+    std::unique_ptr<Resource> resource_;
+
+public:
+    // Move-only, but assignment allowed for container compatibility
+    ResourceHandle(ResourceHandle&&) = default;
+    ResourceHandle& operator=(ResourceHandle&&) = default;
+    
+    uint64_t id() const { return id_; }
+    Resource* get() const { return resource_.get(); }
+    
+    // Encapsulation prevents misuse without deleting assignment
+};
+```
+**Tradeoff:** Type is assignable, so containers work. Runtime invariant checking required if reassignment should be prevented.
 
 ### How It Works: Rebuild-and-Swap
 
@@ -138,18 +224,21 @@ Instead of shifting elements via assignment (like `std::vector`), `lloyal::Inlin
 
 This bypasses the `MoveAssignable` requirement entirely, at the cost of O(n) reconstruction. **Benchmarks show this is actually faster** than in-place assignment for heap insertions (6169ns vs 6335ns Abseil at N=128).
 
-### The Key Insight
+### Understanding the Tradeoffs
 
-These aren't edge cases—they're **good design patterns**. Using `const` to enforce immutability guarantees is a best practice in modern C++. `std::vector` forces you to choose between:
-- ✅ Type safety with `const` members (but lose `insert`/`erase`)
-- ✅ Container flexibility (but lose compile-time invariants)
+**When const members might be justified:**
+- Embedded systems where accessor overhead is measurable
+- Domain models where type-level enforcement is critical
+- Legacy codebases already using this pattern
+- Policy enforcement in large teams (type system as documentation)
 
-`lloyal::InlinedVector` gives you both.
+**When the expert-recommended approach is better:**
+- You need compatibility with standard containers and algorithms
+- You want to follow established STL design patterns
+- You prioritize interoperability over compile-time enforcement
+- You're designing new APIs from scratch
 
-**Note:** For small inline buffers, the primary benefit remains avoiding heap allocations entirely (8-13× faster). Non-assignable type support becomes most critical when:
-- Your collection grows beyond inline capacity and uses heap storage
-- You want to use `insert()`/`erase()` with types that have `const` members
-- You're designing domain types with immutability guarantees and need full container compatibility
+**This library's value:** If your situation justifies `const` members for valid reasons, you're not locked out of dynamic containers. If you follow expert consensus and avoid `const` members, you still benefit from our primary value proposition: **13× faster small buffer performance with zero dependencies.**
 
 ### Verification
 
@@ -382,31 +471,35 @@ Invalidation rules are critical and follow `std::vector` logic *within a storage
 
 ## When to Use `InlinedVector`
 
-### ✅ Use `InlinedVector` When:
+### ✅ Primary Use Case: Small Buffer Optimization Performance
 
-  * **Most instances contain ≤ N elements** (achieves 8-12× speedup over `std::vector`)
-  * **You need zero external dependencies** (embedded systems, header-only libraries, minimal toolchain)
-  * **You're building an SDK/library** and cannot impose Abseil/Boost on your users
-  * **Build time and binary size matter** (single 965-line header vs large library integration)
+  * **Most instances contain ≤ N elements** (achieves 8-13× speedup over `std::vector`)
   * **Allocation overhead dominates** (hot path, many short-lived containers)
   * **Cache locality matters** (inline storage = better cache hits)
-  * **You need `insert`/`erase` for non-assignable types** (unique capability vs peers)
-  * **Workloads have temporary size spikes** (heap→inline transition recovers memory)
+  * **Zero external dependencies required** (embedded systems, header-only libraries, minimal toolchain)
+  * **You're building an SDK/library** and cannot impose Abseil/Boost on your users
+  * **Build time and binary size matter** (single 965-line header vs large library integration)
+
+### ✅ Secondary Use Cases: Unique Capabilities
+
+  * **Workloads have temporary size spikes** (heap→inline transition recovers memory via `shrink_to_fit`)
+  * **You have types with `const` members** (see Philosophy section above) that need `insert`/`erase` operations
+  * **Zero custom allocator overhead required** (PMR, arena allocators with stateful behavior)
 
 ### ❌ Use `std::vector` When:
 
   * **Elements typically > N** (inline buffer wastes stack space, no performance benefit)
   * **Container is long-lived and large** (no benefit from SBO)
   * **Unpredictable sizes** with frequent large allocations
-  * **Simplicity matters more than 12× inline performance gain**
+  * **Simplicity matters more than 13× inline performance gain**
 
 ### ⚖️ Consider Peers (`absl::InlinedVector` / `boost::small_vector`) When:
 
   * Already deeply integrated with Abseil or Boost ecosystems
-  * Need absolute fastest heap insert for complex types (~10% advantage)
   * Require C++03/C++11 compatibility (Boost supports C++03)
   * Prioritize decades of production battle-testing over modern C++17/20 features
-  * Don't need non-assignable type support (all implementations support heap→inline transitions except Boost)
+  * Need absolute fastest heap insert for complex types when not using non-assignable types (~2-3% advantage over lloyal in some benchmarks)
+  * Following expert-recommended design patterns (private members + accessors) and don't need non-assignable type support
 
 -----
 
@@ -642,9 +735,9 @@ audit_log.insert(audit_log.begin(), AuditEvent{0, "System start"});
 | **Heap Insert (N=128)** | **Fastest (6169 ns)** ✅ | Large collections after growth |
 | **Custom Allocators** | **0% overhead** ✅ | PMR, arena allocators, stats tracking |
 | **Shrink To Fit (heap→inline)** | **Same speed as std::vector** ✅ | Memory reclamation after temp spikes |
-| **Non-Assignable Types** | ✅ **Only impl that compiles** | Correctness-critical code with `const` members |
+| **Non-Assignable Types** | ✅ **Only impl that compiles** | Types with `const` members (if that design is chosen) |
 
-**Bottom line:** `lloyal::InlinedVector` delivers **best-in-class performance** (fastest inline trivial fills, fastest heap insertions) while providing **unique correctness guarantees** (non-assignable types, zero allocator overhead) and **zero dependencies**. The allocator-aware rebuild-and-swap strategy proves to be not just correct but also the fastest approach at scale.
+**Bottom line:** `lloyal::InlinedVector` delivers **best-in-class performance** (fastest inline trivial fills, fastest heap insertions) while providing **unique capabilities** (non-assignable types, zero allocator overhead) and **zero dependencies**. The primary value proposition is the **13× SBO performance advantage**—the non-assignable type support is a secondary benefit of the rebuild-and-swap architecture.
 
 -----
 
