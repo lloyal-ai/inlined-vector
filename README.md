@@ -783,16 +783,16 @@ cmake --build build_bench
 
 ### Test Results (v5.7)
 
-  * **Unit Tests**: 15/15 passing (100%) ✅
+  * **Unit Tests**:
       * Tests validate: destructor balance, swap safety, exception safety, edge cases, sentinel pointers, self-aliasing, non-assignable types, allocator support, comparisons, iterator invalidation.
       * **Regression tests** for allocator-awareness bugs:
         * TEST 13: InlineBuf::swap allocator mix-up (POCS=true)
         * TEST 14: parent_ retargeting on mixed swap (inline↔heap)
         * TEST 15: parent_ retargeting on move assignment
-  * **Fuzz Tests**: 9/9 property-based tests passing (100%) ✅
+  * **Fuzz Tests**: property-based tests
       * Properties tested: size invariants, copy/move semantics, insert/erase correctness, inline↔heap transitions, element access, swap behavior.
       * **Regression fuzz tests** for allocator bugs using custom allocators (TestAllocator, TestAllocatorPOCS) and non-assignable types.
-  * **Sanitizers**: **Zero ASan/UBSan violations** across all tests ✅
+  * **Sanitizers**: **Zero ASan/UBSan violations** across all tests
 
 -----
 
